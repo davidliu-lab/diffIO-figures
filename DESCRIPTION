@@ -1,0 +1,47 @@
+Title: Immune infiltrate predicts response to aPD1/aCTLA4 but not aPD1 and distinguishes programs of primary resistance in metastatic melanoma
+Version: 0.0.0.9000
+Description: Not an installable package. This file exists as the dependency
+    manifest for the Quarto book in this repository: renv is configured with
+    snapshot.type = explicit, so the Depends and Imports fields below are what
+    renv.lock is built from. See README.md for setup.
+License: Apache License 2.0
+Encoding: UTF-8
+Depends: 
+    tidyverse
+Imports: 
+    BH,
+    circlize,
+    cluster,
+    ComplexHeatmap,
+    cowplot,
+    dendextend,
+    DESeq2,
+    DT,
+    edgeR,
+    ggalluvial,
+    ggplot2,
+    ggpubr,
+    ggrastr,
+    ggrepel,
+    ggridges,
+    ggtext,
+    GSVA,
+    here,
+    leiden,
+    liger,
+    msigdbr,
+    pheatmap,
+    plotly,
+    RColorBrewer,
+    readxl,
+    RFunctions,
+    scater,
+    scattermore,
+    Seurat,
+    SeuratObject,
+    survminer,
+    sva,
+    testthat,
+    UCell,
+    UpSetR,
+    viridis

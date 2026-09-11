@@ -1,0 +1,78 @@
+---
+title: "GSEA on hypoxic sample DCs"
+execute: 
+  message: false
+  warning: false
+  freeze: auto  
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+library(Seurat)
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+library(DESeq2)
+library(liger)
+```
+
+# Legend
+
+# Figures
+
+## Set up
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(aucell_df, by = c("cell_label" = "cell"))
+```
+
+```{r}
+deseq_obj_list <- readRDS(file.path(data_dir, "scRNAseq", "sc_deseq_obj_hypoxia_list.rds"))
+dc_gs_vec <- readRDS(file.path(results_dir, "dc_gs_vec.rds"))
+```
+
+
+```{r}
+dc_dge_df <- deseq_obj_list$DC %>% 
+  results(name = "hypoxia_hi.v.lo_low.hypoxia_vs_high.hypoxia") %>% 
+  as_tibble(rownames = "gene")
+dc_rank <- dc_dge_df %>% 
+  mutate(signed_neglog10p = ifelse(log2FoldChange > 0, -log10(pvalue), log10(pvalue))) %>% 
+  arrange(desc(signed_neglog10p)) %>% 
+  {set_names(.$signed_neglog10p, .$gene)}
+```
+
+```{r}
+dc_gsea_out <- bulk.gsea(
+  values = dc_rank, 
+  set.list = dc_gs_vec, 
+  power = 0
+)
+```
+
+```{r, fig.asp = 1/2, fig.width = 10}
+dc_gsea_out %>% 
+  as_tibble(rownames= "gs_name") %>% 
+  ggplot() + 
+  aes(fct_reorder(gs_name, sscore), sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  coord_flip() + 
+  theme(legend.position = "bottom")
+```
+
+```{r}
+gsea(
+  values = dc_rank, 
+  dc_gs_vec$GSE22432_CONVENTIONAL_CDC_VS_PLASMACYTOID_PDC_UP, 
+  power = 0
+)
+```
+
+
+
+

@@ -1,0 +1,457 @@
+---
+title: "Process Bulk RNAseq"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+# file specific libraries
+library(sva)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-process")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Set up
+
+Start by reading in the files required for analysis. 
+
+```{r}
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk",  "bulk-clin-metadata.tsv")) %>% 
+  drop_na(sample_RNA)
+tpm_df <- readRDS(file.path(data_dir, "bulk", "tpm_df.rds")) %>% 
+  select(gene, all_of(bulk_clin_metadata$sample_RNA))
+star_df <- readRDS(file.path(data_dir, "bulk", "star_df.rds")) %>% 
+  filter(sample %in% colnames(tpm_df))
+biotype_df <- read_tsv(file.path(data_dir, "ensemblHugoBiotypeMapping_gencode30.txt"))  %>% 
+  select(geneName, geneName_alt, biotype) %>% 
+  distinct()
+```
+
+# STAR metrics
+
+```{r}
+star_tidy <- star_df %>%
+  pivot_longer(cols = 2:ncol(.),
+               names_to = "qc_metric",
+               values_to = "value") 
+```
+
+## Investigate
+
+
+```{r pca_star_df}
+pca_star <- run_or_readRDS(
+  file.path(file_cache_dir, "pca_star.rds"), 
+  function() {
+    star_df %>%
+      column_to_rownames("sample") %>% 
+      .[-{which(apply(., 2, var) == 0)}] %>%
+      prcomp(scale=TRUE)
+  }
+)
+
+pca_star_df <- pca_star$x %>% 
+  as_tibble(rownames = "sample_RNA") %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") 
+pca_star_df %>%
+  ggplot() +
+  aes(PC1, PC2) +
+  geom_point(aes(color = cohort), size = 1.5) +
+  coord_fixed() + 
+  scale_color_manual(values = palette_cohort)
+```
+
+```{r}
+pca_star$rotation %>%
+  as_tibble(rownames = "metric") %>%
+  pivot_longer(
+    cols = str_subset(colnames(.), "PC"),
+    names_to = "PC",
+    values_to = "value"
+  ) %>%
+  filter(PC %in% c("PC1", "PC2")) %>%
+  ggplot() +
+  aes(metric, value) +
+  geom_col() +
+  facet_grid( ~ PC) +
+  coord_flip()
+```
+
+```{r}
+star_tidy %>%
+  mutate(qc_metric = qc_metric %>%
+           str_replace_all("_", " ") %>%
+           str_wrap(width = 10)) %>%
+  ggplot() +
+  aes(x = qc_metric, y = value) +
+  geom_violin() +
+  geom_jitter(size = 0.4) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 5),
+        strip.background = element_blank())
+```
+
+## Exclude
+
+```{r}
+exclusion_star_qc_df <- star_df %>%
+  mutate(exclusion_star_qc = case_when(
+    total_reads < 1e6 ~ "total reads < 1e6",
+    uniquely_mapped_percent < 50 ~ "uniquely mapped reads < 50%",
+    TRUE ~ NA_character_
+  )) %>%
+  select(sample, exclusion_star_qc)
+bad_samples <- exclusion_star_qc_df %>% 
+  filter(!is.na(exclusion_star_qc)) %>% 
+  .$sample
+```
+
+There are 22 samples which do not pass quality control by STAR metric filters
+
+```{r}
+bad_samples
+```
+
+```{r}
+tpm_df_high.quality <- tpm_df %>% 
+  select(-all_of(bad_samples))
+```
+
+# RNA
+
+## Filter to protein coding genes
+
+```{r}
+gene_ann <- tpm_df_high.quality %>% 
+  select(gene) %>% 
+  unique() %>% 
+  left_join(biotype_df, by = c(gene = "geneName_alt")) %>% 
+  dplyr::select(gene, biotype)
+```
+
+```{r pie_gene_ann, fig.asp = 1}
+#| fig-asp: 1
+
+plot_df <- gene_ann %>%
+  group_by(biotype) %>%
+  summarise(count = n()) %>%
+  ungroup() %>% 
+  mutate(cumsum_count = cumsum(count), 
+         total_count = sum(count), 
+         cumsum_count_over_total = cumsum_count / total_count) 
+plot_df %>% 
+  bind_cols(angle = 360 * c(0, plot_df$cumsum_count_over_total[-nrow(plot_df)]) + 90) %>%
+  mutate(biotype = factor(biotype, levels = .$biotype)) %>% 
+  ggplot() +
+  aes("", count, fill = biotype) +
+  geom_bar(stat = "identity", width = 1, color = "white", linewidth = 0.05) +
+  geom_text(
+    aes(
+      label = biotype,
+      y = count,
+      angle = angle,
+    ),
+    color = "black", 
+    fill = "white",
+    hjust = 0,
+    size = 2,
+    position = position_stack(vjust = 0.5)
+  ) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+```{r}
+
+# NOTE, some genes have multiple biotypes. To deal with this, let's just
+# consider genes which have a protein coding biotype. This will help us
+# join the data frames cleanly
+gene_ann_protein.coding.only <- gene_ann %>% 
+  filter(biotype == "protein_coding")
+
+# filter RNA expr to protein coding genes only 
+tpm_df_protein_coding <- tpm_df_high.quality %>% 
+  left_join(gene_ann_protein.coding.only, by = "gene") %>% 
+  filter(biotype == "protein_coding") %>% 
+  select(-biotype)
+```
+
+## Genes expr in at least 5% of samples
+
+```{r}
+# keeping only genes expressed in at least 5% of the samples
+
+nexpressed_df <- tpm_df_protein_coding %>%
+      pivot_longer(
+        cols = 2:ncol(.),
+        names_to = "participant",
+        values_to = "TPM"
+      ) %>%
+      group_by(gene) %>%
+      summarise(n_expressed = sum(TPM > 0))
+nsamples <- ncol(tpm_df_protein_coding) - 1
+nexpressed_df %>%
+    ggplot() +
+    aes(n_expressed) +
+    geom_histogram() +
+    geom_vline(xintercept = nsamples * 0.05)
+
+highly_expressed_genes <- nexpressed_df %>%
+                                 filter(n_expressed > nsamples * 0.05) %>%
+                                 .$gene
+
+```
+
+
+And we're left with 19302 genes. 
+
+```{r}
+length(highly_expressed_genes)
+```
+
+
+```{r}
+tpm_df_filter.var <- filter(tpm_df_protein_coding, gene %in% highly_expressed_genes)
+```
+
+
+## Identify outliers through PCA
+
+```{r}
+pca_rna_scaled <- run_or_readRDS(
+  file.path(file_cache_dir, "pca_rna_scaled.rds"), 
+  function() {
+    tpm_df_filter.var %>%
+      column_to_rownames("gene") %>%
+      t() %>%
+      prcomp(scale = TRUE)
+  }
+)
+pca_rna_scaled_df <- pca_rna_scaled$x %>%
+         as_tibble(rownames = "sample")
+```
+
+```{r, fig.height = 5, fig.width = 5}
+#| fig-height: 5
+#| fig-width: 5 
+
+pca_rna_scaled_df %>%
+  left_join(bulk_clin_metadata, by = c("sample" = "sample_RNA")) %>%
+  ggplot() +
+  aes(PC1, PC2, color = cohort) +
+  geom_point(size = 2, shape = 1) +
+  coord_fixed() +
+  scale_color_manual(values = palette_cohort) +
+  stat_ellipse() + 
+  geom_text_repel(aes(label = sample), 
+                  data = ~..1 %>% filter(sample %in% c("D18-244104", 
+                                                       "MEL-Patient61-Tumor-SM-COOSV_1")))
+```
+
+There is an outlier by PCA in the discovery cohort. 
+
+```{r}
+outlier_sample <- pca_rna_scaled_df %>% 
+  arrange(desc(PC2)) %>% 
+  head(2) %>% 
+  .$sample
+outlier_sample
+```
+
+```{r}
+tpm_no_outlier <- tpm_df_filter.var %>% 
+  select(-all_of(outlier_sample)) 
+
+pca_rna_scaled_no.outlier <- run_or_readRDS(
+  file.path(file_cache_dir, "pca_rna_scaled_no.outlier.rds"), 
+  function() {
+    tpm_no_outlier %>%
+             column_to_rownames("gene") %>%
+             t() %>%
+             prcomp(scale = TRUE)
+  }
+)
+```
+
+```{r}
+pca_rna_scaled_no.outlier_df <- pca_rna_scaled_no.outlier$x %>%
+  as_tibble(rownames = "sample")
+percentVar <-
+  pca_rna_scaled_no.outlier$sdev ^ 2 / sum(pca_rna_scaled_no.outlier$sdev ^
+                                             2)
+
+pca_rna_scaled_no.outlier_df %>%
+  left_join(bulk_clin_metadata, by = c("sample" = "sample_RNA")) %>%
+  ggplot() +
+  aes(PC1, PC2, color = cohort) +
+  geom_point(size = 2, shape = 1) +
+  coord_fixed() +
+  scale_color_manual(values = palette_cohort) +
+  stat_ellipse() + 
+  labs(
+    x = paste0("PC1: ", round(percentVar[1] * 100), "% variance"),
+    y = paste0("PC2: ", round(percentVar[2] * 100), "% variance")
+  )
+```
+
+There is a notable batch effect in the cohorts, we'll address that in the next section. 
+
+# Save new TPM matrix
+
+We'll save this new TPM matrix to `results/`. 
+
+```{r}
+if (!file.exists(file.path(results_dir, "tpm_df.rds"))) {
+  saveRDS(tpm_no_outlier, file.path(results_dir, "tpm_df.rds"))
+} else {
+  message("File exists!")
+}
+```
+
+# Batch correction
+
+## Set up
+
+Start by reading in the files required for analysis. 
+
+```{r}
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk",  "bulk-clin-metadata.tsv")) %>% 
+  filter(!is.na(sample_RNA)) %>% 
+  filter(is.na(excluded_rna))
+tpm_df <- readRDS(file.path(results_dir, "tpm_df.rds"))
+```
+
+# Define the batch effect
+
+How do we choose what are the "batches" to correct against? 
+
+For the discovery cohort, we reasoned that the different in cohort could be due to some noted biological differences (for instance, the stronger UV in Australian cohorts), and that batch correcting by cohort may be too aggressive. 
+
+However, we also noted a strong batch effect by sequencing modality, which, having a clearer technical explanation, we corrected for. 
+
+```{r}
+pca_rna_scaled_no.outlier_df <- pca_rna_scaled_no.outlier$x %>%
+  as_tibble(rownames = "sample")
+percentVar <-
+  pca_rna_scaled_no.outlier$sdev ^ 2 / sum(pca_rna_scaled_no.outlier$sdev ^
+                                             2)
+
+pca_rna_scaled_no.outlier_df %>%
+  left_join(bulk_clin_metadata, by = c("sample" = "sample_RNA")) %>%
+  ggplot() +
+  aes(PC1, PC2, color = sequencing_modality) +
+  geom_point(size = 2, shape = 1) +
+  stat_ellipse() + 
+  labs(
+    x = paste0("PC1: ", round(percentVar[1] * 100), "% variance"),
+    y = paste0("PC2: ", round(percentVar[2] * 100), "% variance")
+  )
+```
+
+## Combat-Seq
+
+We're going to use [ComBat-Seq](https://github.com/zhangyuqing/ComBat-seq) to correct the batch effect due to sequencing modality. 
+
+ComBat-Seq requires the data be in matrix form. 
+
+```{r}
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix()
+```
+
+Then we'll run the correction. 
+
+```{r}
+combatseq_df <- run_or_readRDS(
+  file.path(file_cache_dir, "combatseq_raw.rds"), 
+  function() {
+    seq_mode_key <- set_names(bulk_clin_metadata$sequencing_modality, bulk_clin_metadata$sample_RNA)
+    batch <- unname(seq_mode_key[colnames(tpm_matrix)])
+    combatseq <- ComBat_seq(tpm_matrix, batch, group = NULL, full_mod = FALSE)
+    return(as_tibble(combatseq, rownames = "gene"))
+  }
+)
+
+```
+
+Then, filter out genes of no variance and re-TPM. 
+
+```{r}
+combat_tidy <- combatseq_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample", 
+               values_to = "tpm")
+
+# filter out genes of no variance
+combat_tidy_novar <- combat_tidy %>% 
+  group_by(gene) %>% 
+  mutate(var = var(tpm)) %>% 
+  filter(var != 0) %>% 
+  select(-var) 
+
+# convert back to tpm
+combatseq_reTPM_df_FINAL <- combat_tidy_novar %>% 
+  group_by(sample) %>% 
+  mutate(tpm = (tpm / sum(tpm))*1e6) %>% 
+  pivot_wider(id_cols = sample, 
+              names_from = gene, 
+              values_from = tpm, 
+              values_fill = 0) %>% 
+  dplyr::rename(sample_RNA = sample)
+```
+
+Let's take a look at the PCA now. 
+
+```{r}
+pca_combatseq <- run_or_readRDS(
+  file.path(file_cache_dir, "pca_combatseq.rds"), 
+  function() {
+    tpm_matrix <- combatseq_reTPM_df_FINAL %>%
+      column_to_rownames("sample_RNA") %>%
+      as.matrix() 
+    pca_res <- prcomp(tpm_matrix, scale = T, retx = T)
+    return(pca_res)
+  }
+)
+plot_df <- pca_combatseq$x %>% 
+  as_tibble(rownames = "sample_RNA") %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") 
+
+percentVar <- pca_combatseq$sdev^2 / sum( pca_combatseq$sdev^2 )
+plot_df %>% 
+  ggplot() + 
+  aes(PC1, PC2, color = sequencing_modality) + 
+  geom_point(size = 1.5) + 
+  stat_ellipse() + 
+  labs(x = paste0("PC1: ",round(percentVar[1] * 100),"% variance"), 
+       y = paste0("PC2: ",round(percentVar[2] * 100),"% variance"))
+plot_df %>% 
+  ggplot() + 
+  aes(PC1, PC2, color = cohort) + 
+  geom_point(shape = 1, size = 2) + 
+  stat_ellipse() + 
+  scale_color_manual(values = palette_cohort) + 
+  labs(x = paste0("PC1: ",round(percentVar[1] * 100),"% variance"), 
+       y = paste0("PC2: ",round(percentVar[2] * 100),"% variance"))
+```
+
+# Save
+
+We'll have to save the corrected TPMs to our `results/` directory. 
+
+```{r}
+if (!file.exists(file.path(results_dir, "tpm_df_combatseq.rds"))) {
+saveRDS(combatseq_reTPM_df_FINAL, file.path(results_dir, "tpm_df_combatseq.rds"))
+} else {
+  message("File exists!")
+}
+```
+

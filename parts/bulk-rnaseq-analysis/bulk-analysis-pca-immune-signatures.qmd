@@ -1,0 +1,102 @@
+---
+title: "PCA immune signatures"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+```{r}
+ssgsea_df <- read_tsv(here("results", "bagaev_ssgsea_df.tsv")) %>% 
+  column_to_rownames("gs_name") 
+```
+
+```{r}
+pca_out <- ssgsea_df %>% 
+  as.matrix() %>% 
+  t() %>% 
+  prcomp(scale = TRUE, center = TRUE)
+```
+
+```{r}
+pca_out$x %>% 
+  ggplot() + 
+  aes(PC1, PC2) + 
+  geom_point()
+```
+
+```{r}
+pca_out$sdev^2 / length(pca_out$sdev)
+```
+
+```{r}
+pca_out$rotation %>% 
+  as_tibble(rownames = "gs_name") %>% 
+  ggplot() + 
+  aes(fct_reorder(gs_name, PC1), PC1) + 
+  geom_col() + 
+  coord_flip()
+```
+
+
+```{r, fig.asp = 1.5, fig.width = 4}
+pca_out$rotation %>% 
+  as_tibble(rownames = "gs_name") %>% 
+  mutate(gs_name = factor(gs_name, levels = c(
+    "Treg and Th2 traffic", 
+    "Tumor proliferation rate", 
+    "MHCI", 
+    "Myeloid cells traffic", 
+    "M1 signature", 
+    "Immune Suppression by Myeloid Cells", 
+    "MHCII", 
+    "Macrophage and DC traffic", 
+    "Tumor-associated Macrophages", 
+    "B cells", 
+    "Th1 signature", 
+    "Th2 signature", 
+    "Treg", 
+    "Co-stimulatory ligands", 
+    "Effector cell traffic", 
+    "Antitumor cytokines", 
+    "Co-stimulatory receptors", 
+    "T cells", 
+    "Checkpoint molecules", 
+    "Effector cells", 
+    "NK cells", 
+    "Granulocyte traffic", 
+    "Neutrophil signature", 
+    "Matrix remodeling", 
+    "Cancer-associated fibroblasts", 
+    "Matrix", 
+    "Protumor cytokines", 
+    "Angiogenesis", 
+    "Endothelium"
+  ) %>% rev())) %>% 
+  ggplot() + 
+  aes(gs_name, PC1) + 
+  geom_col() + 
+  coord_flip() + 
+  theme_classic() + 
+  scale_y_continuous(breaks = c(0, 0.1, 0.2))+ 
+  labs(y = "PC1 loading")
+```
+
+
+```{r}
+pca_out$rotation %>% 
+  as_tibble(rownames = "gs_name") %>% 
+  ggplot() + 
+  aes(fct_reorder(gs_name, PC2), PC2) + 
+  geom_col() + 
+  coord_flip()
+```
+
+
+

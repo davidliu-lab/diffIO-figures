@@ -1,0 +1,156 @@
+---
+title: "scRNAseq CytoSig Analysis"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+# document specific libraries: 
+library(dendextend)
+
+file_cache_dir <- file.path(cache_dir, "sc-analysis-hypoxia-cytosig")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+cytosig_sc <- arrow::read_parquet(file.path(data_dir, "scRNAseq", "cytosig_wide.parquet"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv"))
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+```
+
+# cytosig signatures
+
+There are 42 cytokine readouts from cytosig, of different cytokine responses
+
+```{r}
+colnames(cytosig_sc)[2:43]
+```
+
+```{r}
+plot_df <- obs_df %>% 
+  left_join(cytosig_sc, by = c("cell_label" = "cell")) %>% 
+  left_join(aucell_df, by = c("cell_label" = "cell"))
+```
+
+# T cell activation with hypoxia
+
+```{r}
+
+plot_cell_type_cytosig_against_hypoxia <- function(cell_type_str, 
+                                                   cytokine_str) {
+  plot_df %>% 
+    filter(specific_cell_type == cell_type_str) %>% 
+    ggplot() + 
+    aes(`HALLMARK_HYPOXIA`, 
+        get(sprintf("%s_.CytoSig_output.Zscore", cytokine_str))) + 
+    geom_point(aes(color = ifelse(
+      get(sprintf("%s_.CytoSig_output.Pvalue", cytokine_str)) < 0.05,
+      "p<0.05", "n.s."
+      ))) + 
+    geom_density_2d(color = "black") + 
+    theme(legend.position = c(0.8, 0.1), 
+          legend.title = element_blank()) + 
+    labs(y = sprintf("CytoSig %s", cytokine_str), 
+         title = sprintf("CytoSig %s", cell_type_str))
+}
+```
+
+
+```{r, fig.asp = 1, fig.width = 4}
+plot_cell_type_cytosig_against_hypoxia("CD8+ T", "VEGFA")
+plot_cell_type_cytosig_against_hypoxia("CD8+ T", "IL2")
+plot_cell_type_cytosig_against_hypoxia("CD8+ T", "IL4")
+plot_cell_type_cytosig_against_hypoxia("CD8+ T", "IFN1")
+plot_cell_type_cytosig_against_hypoxia("CD8+ T", "IFNG")
+plot_cell_type_cytosig_against_hypoxia("CD8+ T", "CD40L")
+plot_cell_type_cytosig_against_hypoxia("Naive-like T", "VEGFA")
+plot_cell_type_cytosig_against_hypoxia("Naive-like T", "IL2")
+plot_cell_type_cytosig_against_hypoxia("Naive-like T", "IL4")
+plot_cell_type_cytosig_against_hypoxia("Naive-like T", "IFN1")
+plot_cell_type_cytosig_against_hypoxia("Naive-like T", "IFNG")
+plot_cell_type_cytosig_against_hypoxia("Naive-like T", "CD40L")
+plot_cell_type_cytosig_against_hypoxia("TAM", "CD40L")
+```
+
+```{r, fig.asp = 1, fig.width = 4}
+
+plot_cell_type_cytosig_against_hypoxia("Endothelial cells", "VEGFA")
+plot_cell_type_cytosig_against_hypoxia("Endothelial cells", "EGF")
+plot_cell_type_cytosig_against_hypoxia("Fibroblasts", "VEGFA")
+plot_cell_type_cytosig_against_hypoxia("Fibroblasts", "EGF")
+```
+
+
+# VEGFA response
+
+## Summary plots
+
+```{r, fig.asp = 1, fig.width = 4}
+plot_df %>% 
+  ggplot() + 
+  aes(`HALLMARK_ANGIOGENESIS`, `VEGFA_.CytoSig_output.Coef`) + 
+  geom_scattermore() + 
+  geom_density_2d()
+plot_df %>% 
+  ggplot() + 
+  aes(`HALLMARK_HYPOXIA`, `VEGFA_.CytoSig_output.Coef`) + 
+  geom_scattermore() + 
+  geom_density_2d()
+```
+
+
+```{r}
+plot_df %>% plot_umap(color_str = "VEGFA_.CytoSig_output.Coef")
+```
+
+```{r}
+plot_df %>% 
+  ggplot() + 
+  aes(fct_reorder(sample_ID, VEGFA_.CytoSig_output.Coef), VEGFA_.CytoSig_output.Coef) + 
+  geom_violin(scale = "width", draw_quantiles = 0.5) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+## Specific cell types
+
+### Fibroblasts
+
+```{r, fig.asp = 1, fig.width = 4}
+plot_df %>% 
+  filter(general_cell_type == "Fibroblasts") %>% 
+  ggplot() + 
+  aes(`HALLMARK_ANGIOGENESIS`, `VEGFA_.CytoSig_output.Coef`) + 
+  geom_point() + 
+  geom_density_2d()
+plot_df %>% 
+  filter(general_cell_type == "Fibroblasts") %>% 
+  ggplot() + 
+  aes(`HALLMARK_HYPOXIA`, `VEGFA_.CytoSig_output.Coef`) + 
+  geom_point() + 
+  geom_density_2d()
+```
+
+### Endothelial cells
+
+```{r, fig.asp = 1, fig.width = 4}
+plot_df %>% 
+  filter(general_cell_type == "Endothelial cells") %>% 
+  ggplot() + 
+  aes(`HALLMARK_ANGIOGENESIS`, `VEGFA_.CytoSig_output.Coef`) + 
+  geom_point() + 
+  geom_density_2d()
+plot_df %>% 
+  filter(general_cell_type == "Endothelial cells") %>% 
+  ggplot() + 
+  aes(`HALLMARK_HYPOXIA`, `VEGFA_.CytoSig_output.Coef`) + 
+  geom_point() + 
+  geom_density_2d()
+```

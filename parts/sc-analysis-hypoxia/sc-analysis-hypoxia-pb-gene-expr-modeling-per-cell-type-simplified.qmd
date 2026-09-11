@@ -1,0 +1,946 @@
+---
+title: "DGE hypoxia for each cell type, simplified THIS IS THE ONE"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+library(Seurat)
+library(Matrix)
+library(Matrix.utils)
+library(liger)
+library(edgeR)
+
+file_cache_dir <- file.path(cache_dir, "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+## data frames
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(aucell_df, by = c("cell_label" = "cell")) %>% 
+  left_join(mean_hypoxia_df)
+immune_prop_df <- read_tsv(file.path(results_dir, "sc_immune_prop_df.tsv")) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c(
+    "immune low", "immune mid", "immune high"
+  )))
+```
+
+## Seurat objects 
+
+Filter Seurat objects to only include cells with nFeature_RNA > 1000. 
+
+```{r}
+read_in_so_tumor <- function() {
+  so_tumor <- readRDS(file.path(cache_dir, "sc-processing-sctransform-tumor", "so_tumor.rds"))
+  so_tumor <- AddMetaData(
+    so_tumor,
+    metadata = so_tumor@meta.data %>%
+      as_tibble(rownames = "cell") %>%
+      left_join(mean_hypoxia_df, by = "sample_ID") %>%
+      dplyr::select(cell, hypoxia_hi.v.lo, mean_hypoxia) %>%
+      column_to_rownames("cell")
+  )
+  return(so_tumor)
+}
+
+read_in_so_stromal <- function() {
+  so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds")) %>% 
+    subset(subset = nFeature_RNA > 1000)
+  so_stromal <- AddMetaData(so_stromal, metadata = so_stromal@meta.data %>%
+                              as_tibble(rownames = "cell") %>%
+                              left_join(mean_hypoxia_df, by = "sample_ID") %>%
+                              dplyr::select(cell, hypoxia_hi.v.lo, mean_hypoxia) %>% 
+                              column_to_rownames("cell"))
+  return(so_stromal)
+  
+}
+
+read_in_so_imm <- function() {
+  so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds")) %>% 
+    subset(subset = nFeature_RNA > 1000)
+  so_imm <- AddMetaData(
+    so_imm,
+    metadata = so_imm@meta.data %>%
+      as_tibble(rownames = "cell") %>%
+      left_join(mean_hypoxia_df, by = "sample_ID") %>%
+      dplyr::select(cell, hypoxia_hi.v.lo, mean_hypoxia) %>%
+      column_to_rownames("cell"
+      )
+  )
+  return(so_imm)
+}
+
+
+```
+
+# Make pseudobulk
+
+```{r}
+my_seurat_to_sce <- function (so, split_var = NULL, sample_var, vars) 
+{
+    seurat_counts <- so@assays$SCT@counts # need to use SCT counts
+    seurat_metadata <- so@meta.data %>% dplyr::select(sample_var, 
+        vars)
+    if (is.null(split_var)) {
+        sce_obj <- SingleCellExperiment::SingleCellExperiment(assays = list(counts = seurat_counts), 
+            colData = seurat_metadata)
+        sce_obj <- qc_sce(sce_obj, sample_var)
+        return(sce_obj)
+    }
+    else {
+        seurat_metadata <- so@meta.data %>% dplyr::select(vars, 
+            sample_var, split_var)
+        sce <- SingleCellExperiment::SingleCellExperiment(assays = list(counts = seurat_counts), 
+            colData = seurat_metadata)
+        sce_list <- unique(seurat_metadata[[split_var]]) %>% 
+            purrr::map(~base::subset(sce, , get(split_var) == 
+                ..1)) %>% set_names(unique(seurat_metadata[[split_var]]))
+        sce_list <- purrr::map(sce_list, qc_sce, sample_var)
+        return(sce_list)
+    }
+}
+
+my_make_pseudobulk <- function (so, split_var = NULL, sample_var, vars)
+{
+  sce <- my_seurat_to_sce(so, split_var, sample_var, vars)
+  if (is.null(split_var)) {
+    groups <- SummarizedExperiment::colData(sce)[, c(sample_var,
+                                                     vars)]
+    pb <-
+      Matrix.utils::aggregate.Matrix(
+        Matrix::t(SingleCellExperiment::counts(sce)),
+        groupings = groups,
+        fun = "sum"
+      )
+    return(pb)
+  }
+  else {
+    groups <- map(sce, ~ SummarizedExperiment::colData(..1)[,
+                                                            c(sample_var, vars)])
+    pb_list <-
+      map2(
+        sce,
+        groups,
+        ~ Matrix.utils::aggregate.Matrix(
+          Matrix::t(SingleCellExperiment::counts(..1)),
+          groupings = ..2,
+          fun = "sum"
+        )
+      ) %>% set_names(names(sce))
+    return(pb_list)
+  }
+}
+```
+
+
+```{r}
+make_specific_pb_hypoxia <- function(so, cluster_str, ident_str) {
+  so_subset <- subset(so %>% set_idents(cluster_str),
+                      ident = ident_str)
+  so_subset@meta.data$sample_ID <-
+    factor(so_subset@meta.data$sample_ID)
+  pb <- my_make_pseudobulk(
+    so_subset,
+    split_var = NULL,
+    sample_var = "sample_ID",
+    vars = c("hypoxia_hi.v.lo")
+  )
+  return(pb)
+}
+
+pb_imm_list <- run_or_readRDS(
+  file.path(cache_dir, 
+            "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified",
+            "pb_imm_list.rds"), 
+  function() {
+    so_imm <- read_in_so_imm()
+    pb_imm_list <-
+      so_imm@meta.data$specific_cluster_immune %>% unique() %>%
+      .[-3] %>% # dropping NA
+      set_names() %>%
+      map( ~ make_specific_pb_hypoxia(so_imm, "specific_cluster_immune", ..1))
+  }
+)
+```
+
+```{r}
+pb_imm_list[["Neutrophil"]] <- NULL
+pb_imm_list[["Doublets"]] <- NULL
+pb_imm_list[["Contaminating"]] <- NULL
+pb_imm_list[["Stressed"]] <- NULL
+```
+
+```{r}
+pb_stromal_list <- run_or_readRDS(
+  file.path(cache_dir, 
+            "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified",
+            "pb_stromal_list.rds"), 
+  function() {
+    so_stromal <- read_in_so_stromal()
+    pb_stromal_list <-
+      so_stromal@meta.data$general_cluster_stromal %>% 
+      unique() %>%
+      set_names() %>%
+      map( ~ make_specific_pb_hypoxia(so_stromal, "general_cluster_stromal", ..1))
+  }
+)
+```
+
+```{r}
+pb_tumor <- run_or_readRDS(
+  file.path(cache_dir, 
+            "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified",
+            "pb_tumor.rds"), 
+  function( ){
+    so_tumor <- read_in_so_tumor()
+    pb_tumor <- make_pseudobulk(so_tumor,
+                                split_var = NULL,
+                                sample_var = "sample_ID",
+                                vars =  c("hypoxia_hi.v.lo"))
+  }
+)
+```
+
+# Setting up modeling
+
+## Attempt: y=log1p(CPM), OLS
+
+### Prepare data and run analysis
+
+```{r}
+select_hypoxia_df <- mean_hypoxia_df %>% 
+  dplyr::select(sample_ID, mean_hypoxia)
+select_immune_df <- immune_prop_df %>% 
+  mutate(immune_prop = prop) %>% 
+  dplyr::select(sample_ID, immune_prop)
+
+pb_df <- c(pb_imm_list, pb_stromal_list, list(Tumor = pb_tumor)) %>% 
+  map_dfr(as_tibble, rownames = "sample_ID", .id = "cell_type") %>% 
+  separate(sample_ID, sep = "_", into = c("sample_ID", "hypoxia_hi.v.lo"))
+
+pb_tidy <- pb_df %>% 
+  pivot_longer(cols = 4:ncol(.), 
+               names_to = "gene", 
+               values_to = "count") %>% 
+  mutate(count = ifelse(is.na(count), 0, count)) %>% 
+  group_by(sample_ID, cell_type) %>% 
+  mutate(total_counts = sum(count), CPM = count / total_counts * 1e6) %>% 
+  ungroup() %>% 
+  mutate(log1p_CPM = log10(CPM + 1))
+
+pb_tidy <- left_join(pb_tidy, select_hypoxia_df, by = "sample_ID") %>% 
+  left_join(select_immune_df, by = "sample_ID") %>% 
+  mutate(hypoxia_hi.v.lo = factor(hypoxia_hi.v.lo, levels = c(paste0(
+    c("low", "mid", "high"), " hypoxia"
+  )), ordered = TRUE))
+```
+
+```{r, eval = FALSE}
+saveRDS(pb_tidy, here("results", "sc_pb_tidy.rds"))
+```
+
+
+### Model
+
+For each cell type: 
+
+```
+log1p_CPM ~ hypoxia
+```
+
+And we'll only consider genes with abs(log2FC) > 0.1. 
+
+```{r}
+test_genes_in_cell_type <- function(my_pb_tidy, thresh = 0.1) {
+  log2fc_df <- my_pb_tidy %>% 
+    group_by(gene, hypoxia_hi.v.lo) %>% 
+    summarise(mean_log1p_CPM = mean(log1p_CPM)) %>% 
+    pivot_wider(id_cols = gene, 
+                names_from = hypoxia_hi.v.lo, 
+                values_from = mean_log1p_CPM) %>% 
+    mutate(log2FC_high_over_low = log2(`high hypoxia` / `low hypoxia`))
+  
+  select_genes <- log2fc_df %>% 
+    filter(abs(log2FC_high_over_low) > thresh) %>% 
+    .$gene
+  
+  my_pb_tidy %>% 
+    filter(gene %in% select_genes) %>% 
+    group_by(gene) %>% 
+    summarise(lm_out = broom::tidy(lm(log1p_CPM ~ mean_hypoxia))) %>% 
+    unnest(lm_out) %>% 
+    left_join(log2fc_df, by = "gene")
+}
+
+```
+
+```{r}
+pb_tidy_split <- pb_tidy %>% 
+  named_group_split(cell_type)
+
+model_out <- run_or_readRDS(
+  file.path(file_cache_dir, "model_out.rds"), 
+  function() {
+    pb_tidy_split[c(
+        "CD8+ T",
+        "DC",
+        "TAM",
+        "Endothelial cells",
+        "Fibroblasts",
+        "Tumor",
+        "NK",
+        "Tregs", 
+        "Naive-like T"
+      )] %>%
+      map_dfr(test_genes_in_cell_type, .id = "cell_type")
+  }
+)
+```
+
+## Save
+
+```{r, eval = FALSE}
+saveRDS(model_out, here("results", "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified.rds"))
+model_out <- readRDS(here("results", 
+                  "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified.rds"))
+```
+
+## Results
+
+```{r, eval = F}
+so_imm <- read_in_so_imm()
+```
+
+
+### Properties
+
+```{r}
+model_out %>% 
+  group_by(cell_type) %>% 
+  count()
+```
+
+### CD8+ T
+
+```{r}
+model_out %>% 
+  filter(cell_type == "CD8+ T") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  filter(p.value < 0.05) %>% 
+  arrange(desc(estimate)) %>% 
+  head(20)
+```
+
+
+```{r, fig.asp = 1, eval = F}
+metadata_df <- get_metadata_from_so(so_imm)
+genes <- c("CD8A", "CD3D", "CD4", "FOXP3", "IGKC", "FCMR", "TRDC", "FCGR3A", 
+           "HAVCR2", "CXCL13", "TOX")
+gene_expr_df <- get_gene_expr_from_so(so_imm, genes, assay = "SCT")
+sample_ID_hypoxia_ordering <- mean_hypoxia_df %>% 
+  arrange(mean_hypoxia) %>% 
+  .$sample_ID
+metadata_df %>% 
+  filter(specific_cluster_immune == "CD8+ T") %>% 
+  left_join(gene_expr_df, by = "cell") %>% 
+  mutate(sample_ID = factor(sample_ID, levels = sample_ID_hypoxia_ordering)) %>% 
+  pivot_longer(cols = genes) %>% 
+  ggplot() + 
+  aes(sample_ID, value) + 
+  geom_violin(scale = "width") + 
+  rotate_x_text() + 
+  facet_grid(name~.) + 
+  theme(strip.text.y = element_text(angle = 0))
+```
+
+### Tregs
+
+```{r}
+model_out %>% 
+  filter(cell_type == "Tregs") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  filter(p.value < 0.05) %>% 
+  arrange(desc(estimate)) %>% 
+  head(20)
+```
+
+
+```{r, fig.asp = 1, eval = F}
+metadata_df <- get_metadata_from_so(so_imm)
+genes <- c("CD8A", "CD3D", "CD4", "FOXP3", "IGKC", "FCMR", "TRDC", "FCGR3A")
+gene_expr_df <- get_gene_expr_from_so(so_imm, genes, assay = "SCT")
+sample_ID_hypoxia_ordering <- mean_hypoxia_df %>% 
+  arrange(mean_hypoxia) %>% 
+  .$sample_ID
+metadata_df %>% 
+  filter(specific_cluster_immune == "Tregs") %>% 
+  left_join(gene_expr_df, by = "cell") %>% 
+  mutate(sample_ID = factor(sample_ID, levels = sample_ID_hypoxia_ordering)) %>% 
+  pivot_longer(cols = genes) %>% 
+  ggplot() + 
+  aes(sample_ID, value) + 
+  geom_violin(scale = "width") + 
+  rotate_x_text() + 
+  facet_grid(name~.)
+```
+
+### TAM
+
+```{r}
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "TAM") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  head(20)
+```
+
+
+```{r, fig.asp = 1, eval = F}
+metadata_df <- get_metadata_from_so(so_imm)
+genes <- c("TRAC", "IGKC", "HBB", "LY6E", "CD3E", "CD14", "CD68", "AIF1", "SPP1", "CD2")
+gene_expr_df <- get_gene_expr_from_so(so_imm, assay="SCT", genes)
+sample_ID_hypoxia_ordering <- mean_hypoxia_df %>% 
+  arrange(mean_hypoxia) %>% 
+  .$sample_ID
+metadata_df %>% 
+  filter(specific_cluster_immune == "TAM") %>% 
+  left_join(gene_expr_df, by = "cell") %>% 
+  mutate(sample_ID = factor(sample_ID, levels = sample_ID_hypoxia_ordering)) %>% 
+  pivot_longer(cols = genes) %>% 
+  ggplot() + 
+  aes(sample_ID, value) + 
+  geom_violin(scale = "width") + 
+  rotate_x_text() + 
+  facet_grid(name~.) + 
+  labs(x = "sample ID, ordered left to right by increasing hypoxia", 
+       title = "TAM")
+```
+
+### Line plots
+
+```{r}
+coinh_receptors <- c("PDCD1", "CTLA4", "TIGIT")
+activation_genes <- c("NFAT5")
+homing_genes <- c("CCR7")
+hypoxia_genes <- c("HIF1A", "EPAS1")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "Tregs") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% coinh_receptors ~ "coinh. receptors", 
+    gene %in% activation_genes ~ "activation", 
+    gene %in% homing_genes ~ "homing", 
+    gene %in% hypoxia_genes ~ "hypoxia response" ,
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 1) + 
+  labs(title = "Tregs", y = "hypoxia effect estimate")
+```
+
+```{r}
+activation_genes <- c("NFAT5", "CD40LG", 
+                      # "TNFRSF9", 
+                      "TNFSF9", "KLRG1", "TAP1", "STAT1")
+
+homing_genes <- c("CCR7")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "Naive-like T") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% activation_genes ~ "activation", 
+    gene %in% homing_genes ~ "homing", 
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 1) + 
+  labs(title = "Naive like T", y = "hypoxia effect estimate")
+```
+
+```{r}
+effector_genes <- c("IFNGR1", "FOSL2", "TNF", "KLF2")
+terminal_maturation <- c("CX3CR1")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "NK") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% effector_genes ~ "effector?", 
+    gene %in% terminal_maturation ~ "terminal maturation", 
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 1) + 
+  labs(title = "NK", y = "hypoxia effect estimate")
+```
+
+```{r}
+exhaustion_genes <- c("ENTPD1", "CXCL13", "CD101", "HAVCR2", 
+                      "LAG3", "PDCD1")#, "CTLA4", "TIGIT")
+activation_genes <- c("NFAT5", "TNFSF9")#, "KLRG1", "STAT1", "TAP1")
+homing_genes <- c("CCR7")
+hypoxia_genes <- c("HIF1A", "EPAS1")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "CD8+ T") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% exhaustion_genes ~ "exhaustion", 
+    gene %in% activation_genes ~ "activation", 
+    gene %in% homing_genes ~ "homing", 
+    gene %in% hypoxia_genes ~ "hypoxia response" ,
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            force = 5, 
+            hjust = 1) + 
+  labs(title = "CD8+ T cells")
+```
+
+```{r}
+hypoxia_genes <- c("HIF1A", "EPAS1", "VEGFA")
+cdc1_genes <- c("XCR1", "IRF8", "CD74", "CD52", "CLEC9A", "TAP1")
+cdc2_genes <- c("CD14", "CD163", "ITGAM", "SIRPA", "CD2", "CD1C", "CX3CR1")
+# cytokines_and_chemokines <- c("CXCL8", "CXCL2")
+dc_activation <- c("CCR7")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "DC") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% hypoxia_genes ~ "hypoxia/angiogenesis" ,
+    gene %in% cdc1_genes ~ "cDC1" ,
+    gene %in% cdc2_genes ~ "cDC2" ,
+    gene %in% dc_activation ~ "mDC" ,
+    # gene %in% cytokines_and_chemokines ~ "cytokines and chemokines" ,
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 0) + 
+  labs(title = "DC")
+```
+
+```{r}
+hypoxia_genes <- c("HIF1A", "EPAS1", "VEGFA")
+immunosuppressive_genes <- c("CD163", "SPP1", "CCL2", "CSF1", "CSF1R", "ARG1")
+proinflammatory_genes <- c("IL6", "C1QB", "NOS2", "TLR2", "TLR4", "TNF", "IL1B")
+adhesion_genes <- c("VCAM1")
+cytokines_and_chemokines <- c("IL33", "CXCL6", "CXCL10", "CXCL11", "CXCL8", "CXCL2")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "TAM") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    # gene %in% hypoxia_genes ~ "hypoxia response" ,
+    gene %in% immunosuppressive_genes ~ "immunosuppressive",
+    gene %in% proinflammatory_genes ~ "proinflammatory",
+    gene %in% adhesion_genes ~ "adhesion",
+    gene %in% cytokines_and_chemokines ~ "cytokines and chemokines",
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 1, 
+            max.overlaps = Inf) + 
+  labs(title = "TAM")
+```
+
+
+```{r}
+hypoxia_genes <- c("HIF1A", "EPAS1", "VEGFA")
+angiogenesis_genes <- c("SERPINE1", "MMP1", "ANGPT2", "PDGFA", "THBS1", "ESM1", "VWF")
+cytokines_and_chemokines <- c("IL33", "CXCL6", "CXCL10")
+adhesion <- c("EPCAM", "VCAM1")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "Endothelial cells") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% hypoxia_genes ~ "hypoxia response" ,
+    gene %in% angiogenesis_genes ~ "angiogenesis" ,
+    gene %in% cytokines_and_chemokines ~ "cytokines and chemokines", 
+    gene %in% adhesion ~ "adhesion", 
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            force = 5, 
+            hjust = 1) + 
+  labs(title = "Endothelial cells")
+```
+
+```{r}
+hypoxia_genes <- c("HIF1A", "EPAS1", "VEGFA")
+cytokines_and_chemokines <- c("IL6", "IL33", "CXCL6", "CXCL8")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "Fibroblasts") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% hypoxia_genes ~ "hypoxia response" ,
+    gene %in% cytokines_and_chemokines ~ "cytokines and chemokines", 
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 1) + 
+  labs(title = "Fibroblasts")
+```
+
+
+```{r}
+hypoxia_genes <- c("HIF1A", "EPAS1", "VEGFA")
+stromal_crosstalk <- c("FN1")
+cancer_genes <- c("ANGPTL4")
+cytokines_and_chemokines <- c("CXCL8", "CXCL2")
+
+model_out %>% 
+  ungroup() %>% 
+  filter(cell_type == "Tumor") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  arrange(desc(estimate)) %>% 
+  mutate(category = case_when(
+    gene %in% hypoxia_genes ~ "hypoxia response" ,
+    gene %in% stromal_crosstalk ~ "stromal crosstalk",
+    gene %in% cytokines_and_chemokines ~ "cytokines and chemokines", 
+    gene %in% cancer_genes ~ "invasiveness", 
+    TRUE ~ NA_character_
+  )) %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  geom_segment(aes(x = rank, xend = rank, 
+                   y = 0, yend = estimate, 
+                   color = category, 
+                   linetype = p.value < 0.1), 
+               data = ~..1 %>% drop_na(category)) + 
+  geom_point(aes(color = category), 
+             data = ~..1 %>% drop_na(category), size = 3) + 
+  geom_text_repel(aes(label = gene, color = category), 
+            data = ~..1 %>% drop_na(category), 
+            hjust = 1) + 
+  labs(title = "Tumor")
+```
+
+# Limma-voom
+
+## Pre-processing
+
+```{r}
+pb_df <- c(pb_imm_list, pb_stromal_list, list(Tumor = pb_tumor)) %>% 
+  map_dfr(as_tibble, rownames = "sample_ID", .id = "cell_type") %>% 
+  separate(sample_ID, sep = "_", into = c("sample_ID", "hypoxia_hi.v.lo"))
+
+pb_tidy_lv <- pb_df %>% 
+  pivot_longer(cols = 4:ncol(.), 
+               names_to = "gene", 
+               values_to = "count")
+
+pb_mtx_list <- pb_tidy_lv %>%
+  ungroup() %>%
+  named_group_split(cell_type) %>% 
+  map(~{
+    ..1 %>% 
+      drop_na(count) %>% 
+      mutate(sample_celltype = paste0(sample_ID, "__", cell_type)) %>% 
+      pivot_wider(
+        id_cols = gene,
+        names_from = sample_celltype,
+        values_from = count, 
+        values_fill = 0
+      ) %>%
+      column_to_rownames("gene") %>%
+      as.matrix()
+  })
+```
+
+```{r}
+d0_list <- map(pb_mtx_list, DGEList)
+d0_list <- map(d0_list, calcNormFactors)
+```
+
+```{r}
+fit_list <- map(
+  d0_list, 
+  ~{
+    pb_metadata_df <- 
+      tibble(sample_celltype = colnames(..1)) %>% 
+      separate(sample_celltype, 
+               into = c("sample_ID", "cell_type"), 
+               sep = "__", 
+               remove = FALSE) %>% 
+      left_join(dplyr::select(mean_hypoxia_df, sample_ID, mean_hypoxia), 
+                by = "sample_ID")
+    
+    mm <- model.matrix(~0 + mean_hypoxia, data = pb_metadata_df)
+    y <- voom(..1, mm, plot = T)
+    fit <- lmFit(y, mm)
+  }
+)
+```
+
+```{r}
+fit_df <- fit_list %>% 
+  map_dfr(~as_tibble(..1$coefficients, rownames = "gene"), 
+          .id = "cell_type")
+```
+
+## Cross with model
+
+```{r, fig.asp = 1}
+model_out %>% 
+  filter(term == "mean_hypoxia") %>% 
+  left_join(fit_df, by = c("cell_type", "gene")) %>% 
+  mutate(mean_hypoxia = ifelse(is.na(mean_hypoxia), -Inf, mean_hypoxia)) %>% 
+  ggplot() + 
+  aes(estimate, mean_hypoxia) + 
+  geom_point() + 
+  geom_text_repel(aes(label = gene), 
+                  data = ~..1 %>% filter(gene %in% c(
+                    "ACTB"
+                  )), 
+                  color = "blue") + 
+  facet_wrap(~cell_type, ncol = 3) + 
+  labs(x = "estimate from linear model", 
+       y = "estimate from limma-voom")
+```
+
+```{r, fig.asp = 1}
+model_out %>% 
+  filter(term == "mean_hypoxia") %>% 
+  left_join(fit_df, by = c("cell_type", "gene")) %>% 
+  mutate(mean_hypoxia = ifelse(is.na(mean_hypoxia), -Inf, mean_hypoxia)) %>% 
+  ggplot() + 
+  aes(estimate, mean_hypoxia) + 
+  geom_density_2d() + 
+  facet_wrap(~cell_type, ncol = 3) + 
+  labs(x = "estimate from linear model", 
+       y = "estimate from limma-voom")
+```
+
+# Spearman cor
+
+```{r}
+genes_subset <- model_out$gene %>% unique()
+spearman_df <- run_or_readRDS(
+  file.path(file_cache_dir, "spearman.rds"), 
+  function() {
+    spearman_df <- pb_tidy %>%
+      filter(gene %in% genes_subset) %>% 
+      left_join(mean_hypoxia_df, by = c("sample_ID")) %>%
+      group_by(cell_type, gene) %>%
+      summarise(spearman_cor = cor(log1p_CPM, mean_hypoxia.x, method = "spearman"))
+  }
+)
+```
+
+```{r, fig.asp = 1}
+spearman_df %>% 
+  drop_na(spearman_cor) %>% 
+  left_join(filter(model_out, term == "mean_hypoxia"), 
+            by = c("cell_type", "gene")) %>% 
+  drop_na(estimate) %>% 
+  ggplot() + 
+  aes(estimate, spearman_cor) + 
+  geom_point() + 
+  facet_wrap(~cell_type, ncol = 3)
+```
+
+# Comparison bw LM, Limma-voom, and spearman cor
+
+# Expression of vimentin (VIM)
+
+```{r}
+sc_pb_tidy <- readRDS(here("results", "sc_pb_tidy.rds"))
+```
+
+```{r}
+plot_gene_expr_from_pb <- function(gene_str) {
+  
+  sc_pb_tidy %>%
+    filter(gene == gene_str) %>%
+    filter(!(
+      cell_type %in% c("Stressed", "Contaminating", "Doublets", "Neutrophil")
+    )) %>%
+    ggplot() +
+    aes(cell_type, log1p_CPM) +
+    geom_col(
+      aes(y = mean_CPM, fill = cell_type),
+      data = ~ ..1 %>% group_by(cell_type) %>% summarise(mean_CPM = mean(log1p_CPM))
+    ) +
+    geom_jitter(width = 0.2, size = 2) +
+    labs(y = sprintf("%s expression", gene_str)) +
+    scale_fill_manual(values = c(palette_specific_immune, palette_general_cell_type)) +
+    theme(
+      legend.position = "none",
+      axis.ticks.y = element_blank(),
+      axis.line.y = element_blank()
+    ) +
+    scale_y_continuous(expand = c(0, 0), limits = ~ c(..1[1], ..1[2] * 1.1)) +
+    coord_flip()
+  
+}
+```
+
+```{r}
+plot_gene_expr_from_pb("VIM")
+plot_gene_expr_from_pb("PTPRC")
+plot_gene_expr_from_pb("CD8A")
+plot_gene_expr_from_pb("CD3D")
+plot_gene_expr_from_pb("MLANA")
+plot_gene_expr_from_pb("PECAM1")
+plot_gene_expr_from_pb("FCN3")
+```
+
+
+# sessionInfo
+
+```{r}
+sessionInfo()
+```
+

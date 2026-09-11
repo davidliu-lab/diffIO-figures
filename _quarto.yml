@@ -1,0 +1,87 @@
+project:
+  type: book
+
+book:
+  title: "Immune infiltrate predicts response to aPD1/aCTLA4 but not aPD1 and distinguishes programs of primary resistance in metastatic melanoma"
+  author: "Amy Huang"
+  date: ""
+  navbar: 
+    search: true
+  chapters:
+    - index.qmd
+    - parts/get_msigdb_signatures.qmd
+    - part: "Bulk RNA-seq clinical cohort"
+      chapters:
+      - parts/bulk-rnaseq-clin/add-prior-therapies.qmd
+      - parts/bulk-rnaseq-clin/bulk-clin-features.qmd
+      - parts/bulk-rnaseq-clin/bulk-clin-response.qmd
+      - parts/bulk-rnaseq-clin/bulk-clin-survival-excl.qmd
+    - part: "Bulk RNA-seq analysis"
+      chapters: 
+      - parts/bulk-rnaseq-analysis/bulk-analysis-process.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-dge-and-gsea.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-immune-high-vs-low.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-pca-immune-signatures.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-immune-high-vs-low-gsea-results.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-ssgsea.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-hypoxia.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-prior-braf.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-other-immune-signatures.qmd
+      - parts/bulk-rnaseq-analysis/bulk-analysis-gsea-permutation.qmd
+      - parts/bulk-rnaseq-clin/biopsy_site_vs_imm.qmd
+      - parts/bulk-rnaseq-clin/priortherapy_vs_imm.qmd
+      - parts/bulk-rnaseq-clin/mut_vs_imm.qmd
+    - part: "TCGA immune score"
+      chapters:
+      - parts/tcga/tcga-analysis-pancancer-immune-analysis.qmd
+      - parts/tcga/tcga-analysis-immune-high-vs-low.qmd
+    - part: "Single cell RNA-seq clinical cohort"
+      chapters:
+      - parts/sc-clin/sc-clin-features.qmd
+    - part: "Single cell RNA-seq: Processing"
+      chapters:
+        - parts/sc-processing/sc-processing-sctransform-stromal.qmd
+        - parts/sc-processing/sc-processing-sctransform-tumor.qmd
+        - parts/sc-processing/sc-processing-sctransform-immune.qmd
+        - parts/sc-processing/sc-processing-sctransform-immune-m.qmd
+        - parts/sc-processing/sc-processing-sctransform-immune-tnk.qmd
+        - parts/sc-processing/sc-processing-sctransform-immune-b.qmd
+        - parts/sc-processing/sc-processing-ucell.qmd
+        - parts/sc-processing/sc-processing-aucell.qmd
+        - parts/sc-processing/sc-processing-immune.qmd
+        - parts/sc-processing/sc-processing-raw-explore.qmd
+        - parts/sc-processing/sc-processing-markers.qmd
+        - parts/sc-processing/sc-processing-T-exh-scoring.qmd
+        - parts/sc-processing/sc-processing-export-counts-for-cpdb.qmd
+        - parts/sc-processing/sc-processing-cpdb.qmd
+    - part: "Single cell RNA-seq Analysis: Hypoxia"
+      chapters:
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-ordering.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-immune-comp.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-cytosig.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-dge-dc-gsea.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-pb-gene-expr-modeling-per-cell-type-simplified.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-pb-gene-expr-modeling-per-cell-type-simplified-imm-strat.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-pb-signature-scoring.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-cpdb.qmd
+        - parts/sc-analysis-hypoxia/sc-analysis-hypoxia-markers.qmd
+    - part: "External scRNAseq Analysis"
+      chapters: 
+        - parts/external-sc/jerby-arnon-analysis.qmd
+        - parts/external-sc/sade-feldman-analysis.qmd
+    - part: "Figures"
+      chapters:
+        - parts/figures/all-figures.qmd
+        - parts/figures/export-tables.qmd
+
+format:
+  html:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code-fold: true
+    code-tools: true
+    code-link: true
+    highlight: tango
+  
+

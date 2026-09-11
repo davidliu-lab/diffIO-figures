@@ -1,0 +1,523 @@
+---
+title: "Stratification by cell type signatures"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+# document specific packages: 
+library(GSVA)
+library(liger)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-immune-high-vs-low")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  drop_na(sample_RNA) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  mutate(prior_BRAF = case_when(
+    str_detect(prior_therapy, "BRAF|dabrafenib|Dabra|Braf") ~ "BRAF", 
+    cohort == "2019 Gide" & sample_RNA == "ipiPD1_14_PRE_R1" ~ "BRAF", 
+    cohort == "2019 Gide" & sample_RNA == "ipiPD1_17_PRE_R1" ~ "BRAF", 
+    prior_therapy == "unknown" ~ "unknown", 
+    TRUE ~ "no BRAF"
+  ))
+
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds")) %>% 
+  filter(sample_RNA %in% bulk_clin_metadata$sample_RNA)
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "gene", 
+               values_to = "value")
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("sample_RNA") %>% 
+  as.matrix() %>% 
+  t() 
+
+signature_df <- read_excel(
+  file.path(data_dir, "signatures", "1-s2.0-S1535610821002221-mmc2.xlsx"), 
+  sheet = "Gene Description", 
+  skip = 1
+) %>% mutate(Gene = str_replace(Gene, "-", "."))
+
+signature_list <- signature_df %>% 
+  named_group_split(`Gene signature`) %>% 
+  map(~.$Gene) 
+```
+
+```{r}
+bagaev_ssgsea_df <- run_or_readRDS(
+  file.path(file_cache_dir, "bagaev_ssgsea.rds"), 
+  function() {
+    gsva(
+      tpm_matrix,
+      gset.idx.list = signature_list,
+      method = "ssgsea",
+      kcdf = "Gaussian"
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+bagaev_ssgsea_tidy <- bagaev_ssgsea_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_RNA", values_to = "score") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup()
+write_tsv(bagaev_ssgsea_df, file.path(results_dir, "bagaev_ssgsea_df.tsv"))
+```
+
+```{r}
+h_mtx <- bagaev_ssgsea_tidy %>% 
+  pivot_wider(id_cols = NAME, 
+              names_from = sample_RNA, 
+              values_from = zscore) %>% 
+  column_to_rownames("NAME") %>% 
+  as.matrix()
+
+Heatmap(h_mtx, 
+        show_column_names = FALSE, 
+        column_split = 5)
+```
+
+```{r, fig.asp = 0.9}
+#| fig-asp: 0.9
+
+Heatmap(cor(t(h_mtx), method = "spearman"), 
+        name = "spearman\ncorr. ", 
+        col = colorRamp2(breaks = c(-1, 0, 1), 
+                         colors = palette_cor), 
+        row_split = 3, 
+        column_split = 3)
+```
+
+```{r}
+h_dist <- dist(h_mtx)
+row_dend <- as.dendrogram(hclust(h_dist)) %>% 
+  reorder(h_dist)
+immune_signatures <- labels(row_dend[[2]][[2]])
+immune_signatures
+
+write_tsv(tibble(signatures = immune_signatures), 
+          file.path(results_dir, "immune_signatures.tsv"))
+```
+
+```{r}
+h_row_dist <- dist(h_mtx[immune_signatures,])
+row_dend <- as.dendrogram(hclust(h_row_dist)) %>% 
+  reorder(h_row_dist)
+h_col_dist <- stats::dist(t(h_mtx[immune_signatures,]), method = "euclidean")
+col_hclust <- hclust(h_col_dist)
+col_dend <- as.dendrogram(col_hclust) %>% 
+  reorder(h_col_dist, method = "OLO")
+
+h <- Heatmap(
+  h_mtx[immune_signatures, ],
+  show_column_names = FALSE,
+  cluster_rows = row_dend,
+  column_dend_reorder = TRUE, 
+  column_split = cutree(col_hclust, 2)
+)
+
+h_col_dend <- column_dend(draw(h))
+```
+
+```{r}
+kcluster_df <- h_col_dend %>% 
+  imap_dfr(~tibble(sample_RNA = labels(..1), 
+                   kcluster = ..2)) %>% 
+  mutate(immune_hi.v.lo = case_when(
+    kcluster %in% c("1") ~ "immune high", 
+    kcluster %in% c("2") ~ "immune low"
+  ))
+```
+
+## Silhouette Score
+
+```{r}
+max_clusters <- 20
+cluster_out <-
+  map(set_names(2:max_clusters), ~ cutree(col_hclust, k = ..1))
+sil_out <-
+  map(cluster_out, ~ cluster::silhouette(..1, h_col_dist))
+sil_width_df <- imap_dfr(sil_out, ~ data.frame(
+  k = ..2,
+  avg_sil_width = mean(as_tibble(..1)$sil_width)
+))
+sil_width_df %>%
+  mutate(k = factor(k, levels = 2:max_clusters)) %>% 
+  ggplot() +
+  aes(k, avg_sil_width) +
+  geom_col() +
+  labs(x = "K",
+       y = "Average Silhouette Width") +
+  geom_hline(yintercept = 0.4, color = "red") + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.45)) + 
+  theme(axis.line.x = element_blank(), 
+        axis.ticks.x = element_blank())
+```
+
+## Calculate immune score
+
+```{r}
+immune_zscore_df <- bagaev_ssgsea_tidy %>% 
+  filter(NAME %in% immune_signatures) %>% 
+  group_by(sample_RNA) %>% 
+  summarise(immune_zscore = mean(zscore)) %>% 
+  mutate(immune_hi.v.lo_zscore = ifelse(immune_zscore > median(immune_zscore), 
+                                        "immune high", 
+                                        "immune low")) %>% 
+  mutate(immune_hi.med.lo_zscore = case_when(
+    immune_zscore > quantile(immune_zscore, 2/3) ~ "immune high", 
+    immune_zscore >= quantile(immune_zscore, 1/3) ~ "immune med", 
+    immune_zscore < quantile(immune_zscore, 1/3) ~ "immune low", 
+    TRUE ~ NA_character_
+  ))
+immune_hi.v.lo_df <- kcluster_df %>% 
+  left_join(immune_zscore_df, by = "sample_RNA")
+saveRDS(immune_hi.v.lo_df, file.path(results_dir, "immune_hi.v.lo.rds"))
+```
+
+```{r}
+bulk_clin_metadata <- bulk_clin_metadata %>%
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>%
+  left_join(immune_hi.v.lo_df, by = "sample_RNA")
+```
+
+# Immune score vs response
+
+```{r}
+response_imm_count_df <- bulk_clin_metadata %>%
+  group_by(response_splitSD, immune_hi.v.lo, treatment) %>%
+  count() %>%
+  pivot_wider(
+    id_cols = c(treatment, immune_hi.v.lo),
+    names_from = response_splitSD,
+    values_from = n, 
+    values_fill = 0
+  ) 
+response_imm_count_df
+```
+
+```{r}
+prop_df <- bulk_clin_metadata %>%
+  drop_na(response_splitSD) %>%
+  group_by(immune_hi.v.lo, treatment, response_splitSD) %>%
+  count() %>%
+  group_by(immune_hi.v.lo, treatment) %>%
+  mutate(total = sum(n), prop = n / total) %>%
+  # add_factors() %>%
+  mutate(
+    treatment = factor(
+      treatment %>%
+        paste0("\n(n=", total, ")") %>%
+        str_wrap(width = 8),
+      levels = names(palette_treatment) %>%
+        paste0("\n(n=", total, ")") %>%
+        str_wrap(width = 8)
+    )
+  )
+prop_df %>%
+  ggplot() +
+  aes(treatment, prop) +
+  geom_col(aes(fill = response_splitSD), width = 0.6) +
+  facet_grid( ~ immune_hi.v.lo, scale = "free_x") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) +
+  scale_fill_manual(values = palette_response) +
+  labs(x = "Treatment", y = "Frequency") +
+  coord_cartesian(clip = "off") +
+  theme(
+    axis.line.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "top",
+    strip.background = element_blank()
+  )
+```
+
+```{r}
+calculate_fisher_response_by_treatment <- function(clin_metadata) {
+  fisher_df <- clin_metadata %>%
+    drop_na(response_splitSD) %>%
+    group_by(treatment, response_splitSD, immune_hi.v.lo) %>%
+    count() %>%
+    drop_na(response_splitSD) %>%
+    pivot_wider(
+      id_cols = c("treatment", "immune_hi.v.lo"),
+      names_from = response_splitSD,
+      values_from = n
+    ) %>%
+    named_group_split(treatment) %>%
+    map_dfr(
+      ~ ..1 %>%
+        dplyr::select(-treatment) %>%
+        column_to_rownames("immune_hi.v.lo") %>%
+        .[c("immune high", "immune low"), c("R", "NR")] %>%
+        fisher.test() %>%
+        broom::tidy(),
+      .id = "treatment"
+    ) %>%
+    mutate(p.adj = p.adjust(p.value, method = "BH"))
+  return(fisher_df)
+}
+fisher_df <- calculate_fisher_response_by_treatment(bulk_clin_metadata)
+```
+
+```{r}
+fisher_df %>% 
+  mutate(treatment = str_wrap(treatment, width = 12)) %>%
+  mutate(p.value.symbol = case_when(
+    p.value < 0.001 ~ "***", 
+    p.value < 0.01 ~ "**",  
+    p.value < 0.05 ~ "*", 
+    TRUE ~ "n.s."
+  )) %>% 
+  ggplot() + 
+  aes(treatment, estimate) + 
+  geom_col(width = 0.5, size = 0.2) +
+  geom_text(aes(label = format(estimate, digits = 3), y = 0.05),
+            color = "white",
+            hjust = 0) +
+  geom_text(aes(label = sprintf("%s (p=%.3f)", p.value.symbol, p.value)),
+            color = "black",
+            hjust = -0.1) +
+  geom_hline(yintercept = 1,
+             color = "grey",
+             linetype = "dashed") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 14)) +
+  labs(x = "Treatment", y = "Odds Ratio (Immune high / immune low)") +
+  coord_flip() +
+  theme(axis.ticks.y = element_blank(),
+        axis.line.y = element_blank())
+```
+
+# DGE
+
+```{r}
+bulk_clin_metadata_dge <- bulk_clin_metadata %>%
+  mutate(responder = case_when(
+    response == "R" ~ 1, 
+    response == "NR" ~ 0, 
+    TRUE ~ NA_integer_
+  )) %>% 
+  drop_na(responder) %>% 
+  dplyr::select(sample_RNA, responder, treatment, immune_hi.v.lo)
+
+bulk_clin_metadata_dge %>%
+  group_by(responder, treatment, immune_hi.v.lo) %>% 
+  count() %>% 
+  pivot_wider(id_cols = c(immune_hi.v.lo, treatment), 
+              names_from = responder, 
+              values_from = n, 
+              values_fill = 0) %>% 
+  arrange(immune_hi.v.lo)
+```
+
+### Run DGE with custom functions
+
+```{r}
+dge_treatment_immune_df <- run_or_readRDS(
+  file.path(file_cache_dir, "dge_R.v.NR_by_treatment_immune.rds"), 
+  function() {
+    run_dge_split(
+      tpm_tidy,
+      bulk_clin_metadata_dge %>%
+        unite("treatment_immune", treatment, immune_hi.v.lo) %>%
+        filter(treatment_immune != "combo_immune high"),
+      responder,
+      sample_RNA,
+      treatment_immune
+    ) %>%
+      separate(treatment_immune,
+               into = c("treatment", "immune_hi.v.lo"),
+               sep = "_")
+  }
+)
+dge_treatment_immune_df %>% 
+  write_tsv(file.path(results_dir, "dge_treatment_immune_df.tsv"))
+```
+
+
+## No significant results
+
+At a threshold of FDR less than 0.05, there are no significant genes across all groups. 
+```{r}
+dge_treatment_immune_df %>% 
+  filter(p_BH < 0.05)
+```
+
+If we apply a more generous filter (FDR less then 0.25), we are still unable to find many significantly differentially expressed genes. 
+
+```{r}
+dge_treatment_immune_df %>% 
+  filter(p_BH < 0.25)
+```
+
+# Gene Set Enrichment Analysis
+
+## Read in gene sets
+
+```{r}
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+```
+
+## Run GSEA using liger
+
+```{r}
+gsea_treatment_immune_df <- run_or_readRDS(
+  file.path(file_cache_dir, "gsea_R.v.NR_by_treatment_immune.rds"), 
+  function() {
+    dge_list <- dge_treatment_immune_df %>% 
+      arrange(desc(signed_neglog10_p)) %>% 
+      named_group_split(treatment, immune_hi.v.lo) %>% 
+      map(~set_names(.$signed_neglog10_p, .$gene))
+    gsea_list <- dge_list %>% 
+      map(iterative.bulk.gsea, set.list = gs_vec, power = 0)
+    gsea_df <- gsea_list %>% 
+      map_dfr(as_tibble, rownames = "gs_name", .id = "treatment_immune") %>% 
+      separate("treatment_immune", into = c("treatment", "immune_hi.v.lo"), sep = " / ")
+  }
+)
+write_tsv(gsea_treatment_immune_df, 
+          file.path(results_dir, "gsea_R.v.NR_by_treatment_immune.tsv"))
+```
+
+## GSEA results
+
+### What signatures
+
+```{r}
+gsea_treatment_immune_df %>% 
+  named_group_split(treatment, immune_hi.v.lo) %>% 
+  imap(~{
+    ..1 %>%
+      mutate(direction = ifelse(sscore > 0, "R", "NR")) %>%
+      ggplot() +
+      aes(fct_reorder(gs_name, sscore), sscore, color = q.val < 0.05) +
+      geom_point(shape = "|", size = 3) +
+      geom_text_repel(aes(label = gs_name),
+                data = ~ ..1 %>%
+                  filter(q.val < 0.05) %>% 
+                  filter(direction == "R") %>% 
+                  slice_max(abs(sscore), n = 4), 
+                hjust = 1) +
+      geom_text_repel(aes(label = gs_name),
+                data = ~ ..1 %>%
+                  filter(q.val < 0.05) %>% 
+                  filter(direction == "NR") %>% 
+                  slice_max(abs(sscore), n = 4), 
+                hjust = 1) +
+      scale_color_manual(values = palette_bool) +
+      remove_x_spine() +
+      theme(axis.text.x = element_blank()) + 
+      labs(title = ..2)
+  })
+```
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+
+gsea_treatment_immune_wide <- gsea_treatment_immune_df %>% 
+  pivot_wider(id_cols = c(gs_name, immune_hi.v.lo), 
+              names_from = treatment, 
+              values_from = c(q.val, sscore)) 
+p <- gsea_treatment_immune_wide %>% 
+  filter(immune_hi.v.lo == "immune high") %>% 
+  ggplot() + 
+  aes(sscore_aPD1, sscore_aCTLA4, shape = q.val_aPD1 < 0.1 & q.val_aCTLA4 < 0.1, label = gs_name) + 
+  geom_point(size = 2) + 
+  scale_shape_manual(values = c(4, 19)) + 
+  theme(legend.position = "top")
+p + 
+  geom_point(size = 3, data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA"), color = "red") + 
+  geom_text_repel(data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA"), color = "red") 
+ggplotly(p + theme(legend.position = "none"))
+```
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+
+gsea_treatment_immune_wide <- gsea_treatment_immune_df %>% 
+  pivot_wider(id_cols = c(gs_name, treatment), 
+              names_from = immune_hi.v.lo, 
+              values_from = c(q.val, sscore)) 
+p <- gsea_treatment_immune_wide %>% 
+  filter(treatment == "aPD1") %>% 
+  ggplot() + 
+  aes(`sscore_immune low`, `sscore_immune high`, label = gs_name, 
+      shape = `q.val_immune low` < 0.1 & `q.val_immune high` < 0.1) + 
+  geom_point(size = 2) + 
+  geom_point(color = "red", 
+             data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA")) + 
+  scale_shape_manual(values = c(4, 19)) + 
+  theme(legend.position = "top")
+p +
+  geom_point(size = 3, data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA"), color = "red") + 
+  geom_text_repel(data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA"), color = "red") 
+ggplotly(p + theme(legend.position = "none"))
+```
+
+## Change from previous
+
+```{r}
+gsea_treatment_df <- readRDS(file.path(cache_dir, "bulk-analysis-dge-and-gsea", "gsea_R.v.NR_by_treatment.rds"))
+```
+
+```{r, fig.asp = 1}
+plot_df <- gsea_treatment_immune_df %>% 
+  bind_rows(gsea_treatment_df) %>% 
+  mutate(signed_p = ifelse(sscore > 0, -log10(p.val), log10(p.val))) %>% 
+  group_by(treatment, immune_hi.v.lo) %>% 
+  arrange(desc(signed_p), desc(sscore)) %>% 
+  mutate(rank = row_number()) %>% 
+  pivot_wider(id_cols = c(treatment, gs_name), 
+              names_from = immune_hi.v.lo, 
+              values_from = c(q.val, rank, sscore)) %>% 
+  filter(treatment == "aPD1") %>% 
+  mutate(direction_pre = ifelse(sscore_NA > 0, "enriched in R", "enriched in NR")) %>% 
+  mutate(immhigh_delta = `rank_NA` - `rank_immune high`) %>% 
+  mutate(immlow_delta = `rank_NA` - `rank_immune low`)
+# plot_df
+plot_delta_lollipop <- function(plot_df, var_str) {
+  plot_df %>% 
+    filter(abs(get(var_str)) < 100) %>% 
+    ggplot() + 
+    aes(fct_reorder(gs_name, get(var_str)), get(var_str), 
+        color = direction_pre) + 
+    geom_hline(yintercept = 0, linetype = "dashed") + 
+    geom_segment(aes(xend = gs_name, y = 0, yend = get(var_str))) + 
+    geom_point(size = 3) + 
+    turn_xaxis_labels() + 
+    remove_x_spine() + 
+    theme(panel.grid.major.x = element_line()) + 
+    labs(y = var_str, title = var_str, subtitle = "signif in before/after") 
+}
+plot_delta_lollipop(plot_df %>%
+                      filter(`q.val_immune high` < 0.05 &
+                               `q.val_NA` < 0.05),
+                    "immhigh_delta")
+plot_delta_lollipop(plot_df %>%
+                      filter(`q.val_immune low` < 0.05 &
+                               `q.val_NA` < 0.05),
+                    "immlow_delta") + 
+  theme(axis.text.x = element_text(size = 5))
+```
+
+```{r}
+gsea_treatment_immune_df %>% 
+  filter(gs_name == "HALLMARK_HYPOXIA")
+```
+
+```{r}
+gsea_treatment_immune_df %>% 
+  filter(gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE")
+```
+

@@ -1,0 +1,63 @@
+---
+title: "prior therapy vs immune state"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r, message = FALSE}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_rna_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-rna-metadata.tsv")) %>% 
+  select(patient, sample_RNA) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA")
+
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata-w-updated-targeted-therapies.tsv")) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  drop_na(sample_RNA) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") 
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+```
+
+```{r}
+clin_metadata <- bulk_clin_metadata %>% 
+  mutate(prior_therapies_grouped = case_when(
+    str_detect(prior_therapy, "d\\+t|LGX\\+MEK|BRAF|Dabra|panRAF") ~ "BRAFi/panRAF", 
+    prior_therapy == "none" ~ "none/unknown", 
+    TRUE ~ "other prior"
+  ))
+```
+
+```{r, fig.asp = 0.8, fig.width = 4}
+clin_metadata %>% 
+  ggplot() + 
+  aes(prior_therapies_grouped, immune_zscore) + 
+  geom_boxplot(fill = "grey") + 
+  geom_jitter(width = 0.2, size = 0.5) + 
+  remove_x_spine()
+```
+
+```{r}
+clin_metadata %>% 
+  group_by(prior_therapies_grouped, immune_hi.v.lo) %>% 
+  count() %>% 
+  pivot_wider(id_cols = prior_therapies_grouped, 
+              names_from = immune_hi.v.lo, 
+              values_from = n, 
+              values_fill = 0) %>% 
+  mutate(pct_imm_high = `immune high` / (`immune high` + `immune low`)) %>% 
+  drop_na(pct_imm_high)
+```
+
+
+
+

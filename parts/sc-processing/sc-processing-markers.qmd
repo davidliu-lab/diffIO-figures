@@ -1,0 +1,144 @@
+---
+title: "scRNAseq markers"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-raw-explore")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv"))
+so_tumor <- readRDS(file.path(cache_dir, "sc-processing-sctransform-tumor", "so_tumor.rds"))
+so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds"))
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+```
+
+# dot plots 
+
+## general cell type 
+
+```{r}
+genes <- c(
+  "PTPRC", # Immune marker
+  "MS4A1", "CD19", "BANK1", # B cell markers, 
+  "FCN3", "COL3A1", "COL6A1",  "AREG", "SFN", "KRT14", # Stromal Markers
+  "FCER1G", "IL1B", "CXCL8", # Myeloid markers
+  "TRAC", "CD3D", "CD8A",  # T cell markers, 
+  "MLANA" # Tumor markers
+)
+```
+
+```{r}
+genes_tumor <- get_metadata_from_so(so_tumor, genes = genes, metadata = NULL, reduction = NULL) 
+genes_imm <- get_metadata_from_so(so_imm, genes = genes, metadata = NULL, reduction = NULL)
+genes_stromal <- get_metadata_from_so(so_stromal, genes = genes, metadata = NULL, reduction = NULL) 
+genes_df <- bind_rows(genes_tumor, genes_imm, genes_stromal)
+
+genes_df <- obs_df %>% 
+  select(cell_label, general_cell_type) %>% 
+  rename(cell = cell_label) %>% 
+  left_join(genes_df, by = "cell")
+```
+
+```{r}
+dotplot_df <-
+  genes_df %>%
+  pivot_longer(cols = all_of(genes),
+               names_to = "gene",
+               values_to = "expr") %>%
+  mutate(general_cell_type = factor(general_cell_type, levels = rev(sort(
+    unique(.$general_cell_type)
+  )))) %>%
+  mutate(gene = factor(gene, levels = genes)) %>%
+  group_by(gene) %>%
+  mutate(scaled_expr = as.vector(scale(expr))) %>%
+  group_by(general_cell_type, gene) %>%
+  summarise(mean_scaled_expr = mean(expr)) 
+dotplot_df %>%
+  ggplot() +
+  aes(gene, general_cell_type) +
+  geom_point(aes(size = mean_scaled_expr, color = mean_scaled_expr)) +
+  scale_color_viridis(limits = c(NA, 4) , oob = scales::squish) +
+  scale_size(range = c(0, 9)) +
+  remove_spines() +
+  theme(
+    panel.background = element_rect(color = "black"),
+    axis.title = element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5
+    ),
+    axis.text.y = ggtext::element_markdown()
+  )
+```
+
+
+## specific cell type 
+
+```{r}
+genes <- c(
+  "BANK1", "MS4A1", "CD19", # B cells, 
+  "CD8B", "GZMB", "HAVCR2", # CD8+ T
+  "CCR7", "IRF7", "IDO1", # DCs
+  "FCER1G", "IL1B", "FOLR2", # Mac/mono
+  "TPSAB1", # Mast cell, 
+  "IL7R", "TCF7", # Naive-like T, 
+  "S100A8", # Neutrophils, 
+  "NKG7", "KLRD1", "XCL1", # NK cells, 
+  "JCHAIN", # Plasma cells, 
+  "FOXP3", "IKZF2", "ICOS", # Tregs
+  "MKI67", "STMN1" # proliferating
+)
+```
+
+```{r}
+dotplot_df <-
+  get_metadata_from_so(so_imm, genes = genes, reduction = NULL) %>%
+  pivot_longer(cols = all_of(genes),
+               names_to = "gene",
+               values_to = "expr") %>%
+  drop_na(specific_cluster_immune) %>% 
+  mutate(specific_cluster_immune = factor(specific_cluster_immune, levels = rev(sort(
+    unique(.$specific_cluster_immune)
+  )))) %>%
+  mutate(gene = factor(gene, levels = genes)) %>%
+  group_by(gene) %>%
+  mutate(scaled_expr = as.vector(scale(expr))) %>%
+  group_by(specific_cluster_immune, gene) %>%
+  summarise(mean_scaled_expr = mean(expr)) 
+dotplot_df %>%
+  ggplot() +
+  aes(gene, specific_cluster_immune) +
+  geom_point(aes(size = mean_scaled_expr, color = mean_scaled_expr)) +
+  scale_color_viridis(limits = c(NA, 4) , oob = scales::squish) +
+  scale_size(range = c(0, 9)) +
+  remove_spines() +
+  theme(
+    panel.background = element_rect(color = "black"),
+    axis.title = element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5
+    ),
+    axis.text.y = ggtext::element_markdown()
+  )
+```
+
+

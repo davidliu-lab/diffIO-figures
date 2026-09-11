@@ -1,0 +1,243 @@
+---
+title: "GSEA results"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+# document specific packages: 
+library(GSVA)
+library(liger)
+library(UpSetR)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-immune-high-vs-low-discovery")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  drop_na(sample_RNA) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") 
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds"))
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "gene", 
+               values_to = "value")
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("sample_RNA") %>% 
+  as.matrix() %>% 
+  t()
+
+dge_immune_df <- read_tsv(file.path(results_dir, "dge_treatment_immune_df.tsv"))
+gsea_immune_df <- read_tsv(file.path(results_dir, "gsea_R.v.NR_by_treatment_immune.tsv"))
+
+dge_df <- read_tsv(file.path(results_dir, "dge_treatment.tsv"))
+gsea_df <- read_tsv(file.path(results_dir, "gsea_treatment.tsv"))
+```
+
+# Upset Plots
+
+```{r}
+upset_df <- gsea_immune_df %>% 
+  mutate(significant = ifelse(q.val < 0.1, 1, 0)) %>% 
+  mutate(direction = ifelse(sscore > 0, "response", "non-response")) %>% 
+  mutate(treatment_imm_dir = paste0(treatment, "__", immune_hi.v.lo, "__", direction)) %>% 
+  filter(treatment_imm_dir %>% str_detect("__response")) %>% 
+  pivot_wider(id_cols = gs_name, 
+              names_from = treatment_imm_dir, 
+              values_from = significant, 
+              values_fill = 0) %>% 
+  column_to_rownames("gs_name")
+upset(upset_df, nsets = ncol(upset_df), nintersects = NA)
+```
+
+```{r}
+upset_df <- gsea_immune_df %>% 
+  mutate(significant = ifelse(q.val < 0.1, 1, 0)) %>% 
+  mutate(direction = ifelse(sscore > 0, "response", "non-response")) %>% 
+  mutate(treatment_imm_dir = paste0(treatment, "__", immune_hi.v.lo, "__", direction)) %>% 
+  filter(treatment_imm_dir %>% str_detect("__non-response")) %>% 
+  pivot_wider(id_cols = gs_name, 
+              names_from = treatment_imm_dir, 
+              values_from = significant, 
+              values_fill = 0) %>% 
+  column_to_rownames("gs_name")
+upset(upset_df, nsets = ncol(upset_df), nintersects = NA)
+```
+
+# Specific signatures
+
+
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "KEGG_T_CELL_RECEPTOR_SIGNALING_PATHWAY") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "KEGG_T_CELL_RECEPTOR_SIGNALING_PATHWAY")
+```
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_INTERFERON_GAMMA_RESPONSE")
+```
+
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION")
+```
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_E2F_TARGETS") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_E2F_TARGETS")
+```
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_G2M_CHECKPOINT") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_G2M_CHECKPOINT")
+```
+
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_TGF_BETA_SIGNALING") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_TGF_BETA_SIGNALING")
+```
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_WNT_BETA_CATENIN_SIGNALING") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_WNT_BETA_CATENIN_SIGNALING")
+```
+
+
+```{r}
+gsea_immune_df %>% 
+  filter(gs_name == "HALLMARK_HYPOXIA") %>% 
+  ggplot() + 
+  aes(treatment, sscore) + 
+  geom_col(aes(fill = q.val < 0.1)) + 
+  facet_grid(~immune_hi.v.lo) + 
+  rotate_x_text() + 
+  remove_x_spine() +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) + 
+  labs(title = "HALLMARK_HYPOXIA")
+```
+
+# Hypoxia in anti-PD-1 immune high
+
+
+
+```{r}
+gsea_wide <- gsea_immune_df %>% 
+  bind_rows(gsea_df) %>% 
+  pivot_wider(id_cols = c(treatment, gs_name), 
+              names_from = immune_hi.v.lo, 
+              values_from = c(sscore, q.val)) 
+```
+
+```{r, fig.width = 10, fig.height = 6}
+gsea_immune_df %>% 
+  filter(treatment == "aPD1") %>% 
+  filter(immune_hi.v.lo == "immune high") %>% 
+  filter(q.val < 0.1) %>% 
+  mutate(direction = ifelse(sscore > 0, "R", "NR")) %>% 
+  group_by(direction) %>% 
+  # slice_max(order_by = abs(sscore), n = 15) %>% 
+  ggplot() + 
+  aes(fct_reorder(gs_name, sscore), sscore) + 
+  geom_col(aes(fill = -log10(q.val))) + 
+  scale_fill_continuous(limits = c(-log10(0.1), -log10(0.0001))) + 
+  coord_flip() + 
+  remove_spines() + 
+  theme(legend.position = "top", 
+        legend.text = element_blank(), 
+        axis.title.y = element_blank()) 
+```
+
+
+
+```{r, fig.asp = 1/3}
+gsea_immune_df %>% 
+  filter(treatment == "aPD1") %>% 
+  filter(gs_name %in% c("HALLMARK_HYPOXIA", "HALLMARK_GLYCOLYSIS", 
+                        "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION")) %>% 
+  # filter(q.val < 0.1) %>% 
+  filter(immune_hi.v.lo == "immune low") %>% 
+  mutate(direction = ifelse(sscore > 0, "R", "NR")) %>% 
+  group_by(direction) %>% 
+  ggplot() + 
+  aes(fct_reorder(gs_name, sscore), sscore) + 
+  geom_col(aes(fill = -log10(q.val))) + 
+  facet_grid(immune_hi.v.lo~.) +
+  coord_flip() + 
+  remove_spines() + 
+  scale_fill_continuous(limits = c(-log10(0.1), -log10(0.0001))) + 
+  theme(legend.position = "top", 
+        legend.text = element_blank(), 
+        axis.title.y = element_blank()) 
+```

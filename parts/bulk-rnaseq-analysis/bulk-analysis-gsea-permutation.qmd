@@ -1,0 +1,195 @@
+---
+title: "GSEA permutation testing"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+# document specific packages: 
+library(liger)
+library(furrr)
+plan(multisession, workers = 6)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-gsea-permutation")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Purpose
+
+The purpose of this notebook is to attempt permutation testing with the GSEA results, with a stratification. The question here is, are the directional changes that we observe between immune high and immune low significant? Or if we drew any random stratification and ran GSEA on them would we expect to see that degree of difference?
+
+# Method
+
+To run this method, we will: 
+
+1. Randomly sample X number of samples to be "immune high" and X to be "immune low" and run DGE
+2. Run GSEA using liger on 254 gene sets (WITHOUT permutation), separately on immune high and immune low. We'll just use anti-PD-1 to cut down on repetition. For a preliminary analysis, we'll just save the entire data frame. 
+3. Repeat step 2, 100x
+
+# Read in data
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  drop_na(sample_RNA) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") %>% 
+  filter(treatment == "aPD1") %>% 
+  drop_na(response) %>% 
+  mutate(responder = ifelse(response == "R", 1, 0)) %>% 
+  select(sample_RNA, responder, immune_hi.v.lo)
+
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds")) %>% 
+  filter(sample_RNA %in% bulk_clin_metadata$sample_RNA)
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "gene", 
+               values_to = "value")
+
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+```
+
+## how many imm high vs low
+
+```{r}
+bulk_clin_metadata %>% 
+  select(immune_hi.v.lo) %>% 
+  table()
+```
+
+# Testing workflow
+
+```{r}
+fake_clin_metadata <- bulk_clin_metadata %>% 
+  mutate(immune_hi.v.lo = sample(immune_hi.v.lo))
+```
+
+```{r}
+dge_out <- run_dge_split(
+  tpm_tidy,
+  fake_clin_metadata, 
+  responder,
+  sample_RNA,
+  immune_hi.v.lo
+) 
+```
+
+```{r}
+dge_list <- dge_out %>%
+  arrange(desc(signed_neglog10_p)) %>%
+  named_group_split(immune_hi.v.lo) %>%
+  map(~ set_names(.$signed_neglog10_p, .$gene))
+gsea_list <- dge_list %>%
+  map(bulk.gsea, set.list = gs_vec, power = 0,
+      n.rand = 1, 
+      skip.qval.estimation = TRUE)
+gsea_df <- gsea_list %>%
+  map_dfr(as_tibble, rownames = "gs_name", .id = "immune_hi.v.lo") 
+```
+
+```{r}
+delta_df <- gsea_df %>% 
+  pivot_wider(id_cols = gs_name, 
+              names_from = immune_hi.v.lo, 
+              values_from = sscore) %>% 
+  mutate(delta_high_over_low = `immune high` - `immune low`) %>% 
+  arrange(delta_high_over_low) %>% 
+  mutate(rank = row_number()) %>% 
+  mutate(direction = ifelse(delta_high_over_low > 0, "high>low", "low>high")) %>% 
+  mutate(
+    direction_flipped = ifelse(
+      `immune high` * `immune low` > 0,
+      "no change in direction",
+      "change in direction"
+    )
+  )
+delta_df %>% 
+  group_by(direction_flipped) %>% 
+  count() %>% 
+  pivot_wider(names_from = direction_flipped, 
+              values_from = n)
+```
+
+
+```{r}
+run_gsea_fake_strat <- function() {
+  fake_clin_metadata <- bulk_clin_metadata %>%
+    mutate(immune_hi.v.lo = sample(immune_hi.v.lo))
+  
+  dge_out <- run_dge_split(tpm_tidy,
+                           fake_clin_metadata,
+                           responder,
+                           sample_RNA,
+                           immune_hi.v.lo)
+  dge_list <- dge_out %>%
+    arrange(desc(signed_neglog10_p)) %>%
+    named_group_split(immune_hi.v.lo) %>%
+    map( ~ set_names(.$signed_neglog10_p, .$gene))
+  
+  gsea_list <- dge_list %>%
+    map(
+      bulk.gsea,
+      set.list = gs_vec,
+      power = 0,
+      n.rand = 1,
+      skip.qval.estimation = TRUE
+    )
+  gsea_df <- gsea_list %>%
+    map_dfr(as_tibble, rownames = "gs_name", .id = "immune_hi.v.lo") 
+  
+  return(gsea_df)
+}
+```
+
+# Analysis
+
+```{r}
+gsea_i_df <- furrr::future_map_dfr(set_names(1:100), 
+                                   ~run_gsea_fake_strat(), 
+                                   .id = "i", 
+                                   .options=furrr_options(seed = TRUE))
+```
+
+```{r}
+delta_df <- gsea_i_df %>% 
+  pivot_wider(id_cols = c(i, gs_name), 
+              names_from = immune_hi.v.lo, 
+              values_from = sscore) %>% 
+  mutate(delta_high_over_low = `immune high` - `immune low`) %>% 
+  arrange(delta_high_over_low) %>% 
+  mutate(rank = row_number()) %>% 
+  mutate(direction = ifelse(delta_high_over_low > 0, "high>low", "low>high")) %>% 
+  mutate(
+    direction_flipped = ifelse(
+      `immune high` * `immune low` > 0,
+      "no change in direction",
+      "change in direction"
+    )
+  )
+delta_change_df <- delta_df %>% 
+  group_by(i, direction_flipped) %>% 
+  count() %>% 
+  pivot_wider(id_cols = i, 
+              names_from = direction_flipped, 
+              values_from = n)
+delta_change_df
+```
+
+```{r}
+delta_change_df$`change in direction` %>% hist()
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

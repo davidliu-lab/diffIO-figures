@@ -1,0 +1,107 @@
+---
+title: "Get MSigDB Signatures"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+
+# document specific packages: 
+library(msigdbr)
+```
+
+```{r}
+h_df <- msigdbr(category = "H")
+kegg_df <- msigdbr(category = "C2", subcategory = "KEGG")
+immsigdb_df <- msigdbr(category = "C7", subcategory = "IMMUNESIGDB")
+kaech_goldrath_df <- immsigdb_df %>% 
+  filter(str_detect(gs_name, "GOLDRATH|KAECH")) 
+
+gs_df <- bind_rows(
+  h_df, 
+  kegg_df, 
+  kaech_goldrath_df
+)
+saveRDS(gs_df, file.path(results_dir, "gs_df.rds"))
+
+gs_vec <- gs_df %>% 
+  named_group_split(gs_name) %>% 
+  map(~.$gene_symbol)
+saveRDS(gs_vec, file.path(results_dir, "gs_vec.rds"))
+```
+
+## more Exh signatures
+
+```{r}
+exh_gs_df <- immsigdb_df %>% 
+  filter(str_detect(gs_name, "EXH"))
+exh_gs_vec <- exh_gs_df %>% 
+  named_group_split(gs_name) %>% 
+  map(~.$gene_symbol)
+saveRDS(exh_gs_vec, file.path(results_dir, "exh_gs_vec.rds"))
+```
+
+## Extra hypoxia signatures
+
+```{r}
+cgp_df <- msigdbr(category = "C2", subcategory = "CGP")
+relevant_sigs <- c("BUFFA_HYPOXIA_METAGENE", "HARRIS_HYPOXIA", "KIM_HYPOXIA", "WINTER_HYPOXIA_METAGENE")
+hypoxia_gs_df <- cgp_df %>% 
+  filter(gs_name %in% relevant_sigs)
+
+saveRDS(hypoxia_gs_df, file.path(results_dir, "hypoxia_gs_df.rds"))
+
+hypoxia_gs_vec <- hypoxia_gs_df %>% 
+  named_group_split(gs_name) %>% 
+  map(~.$gene_symbol)
+saveRDS(hypoxia_gs_vec, file.path(results_dir, "hypoxia_gs_vec.rds"))
+```
+
+## Looking for some DC signatures....
+
+Let's look in ImmuneSigDB. 
+
+```{r}
+immunesigdb_df <- msigdbr(category = "C7", subcategory = "IMMUNESIGDB")
+```
+
+How many signatures have DC in the name?
+
+```{r}
+immunesigdb_df %>% 
+  filter(str_detect(gs_name, "DC_")) %>% 
+  .$gs_name %>% 
+  unique() %>% 
+  length()
+```
+
+```{r}
+immunesigdb_df %>% 
+  filter(str_detect(gs_name, "DC_")) %>%
+  filter(str_detect(gs_name, "CONV")) %>% 
+  .$gs_name %>% unique()
+```
+
+```{r}
+immunesigdb_df %>% 
+  filter(str_detect(gs_name, "DC_")) %>%
+  filter(str_detect(gs_name, "HYPOX")) %>% 
+  .$gs_name %>% unique()
+```
+
+```{r}
+dc_sigs_df <- immunesigdb_df %>% 
+  filter(str_detect(gs_name, "GSE22432|GSE3691|GSE22282"))
+dc_gs_vec <- dc_sigs_df %>% 
+  named_group_split(gs_name) %>% 
+  map(~.$gene_symbol)
+saveRDS(dc_gs_vec, file.path(results_dir, "dc_gs_vec.rds"))
+```
+
+
+
+

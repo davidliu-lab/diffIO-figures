@@ -1,0 +1,187 @@
+---
+title: "mutations vs immune state"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r, message = FALSE}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+```{r, message = FALSE}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_rna_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-rna-metadata.tsv")) %>% 
+  select(patient, sample_RNA) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA")
+
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+full_bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata-w-updated-targeted-therapies.tsv"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata-w-updated-targeted-therapies.tsv")) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  drop_na(sample_RNA) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") 
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+```
+
+```{r}
+maf_df <- read_csv(file.path(data_dir, "bulk", "wes_maf_discov.csv"))
+
+maf_nonsilent_df <- maf_df %>% 
+  filter(!(Variant_Classification %in% c("Silent", "3'UTR", "5'UTR", "IGR", "Intron")))
+```
+
+## B2m muts
+
+```{r}
+b2m_df <- maf_nonsilent_df %>% 
+  filter(Hugo_Symbol == "B2M")
+b2m_df_participants <- b2m_df$participant
+maf_participants <- maf_df$participant
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  mutate(has_b2m_mut = case_when(
+    patient %in% b2m_df_participants ~ TRUE, 
+    patient %in% maf_participants ~ FALSE, 
+    TRUE ~ NA
+  )) %>% 
+  select(has_b2m_mut, immune_hi.v.lo) %>% 
+  table()
+```
+
+```{r}
+muts <- matrix(
+  c(3, 1, 102, 64),
+  nrow = 2,
+  dimnames =
+    list(c("immunehigh", "immunelow"), c("b2m_mut", "rest"))
+)
+
+print(muts)
+fisher.test(muts)
+```
+
+## APC
+
+```{r}
+apc_genes <- c(
+  "RFXANK", "RFXAP", "RFX", 
+  "CIITA", "NLRC5", "B2M", 
+  "HLA-C", "HLA-C", "HLA-A", 
+  "ICAM1", "PTK2", "SCIN", 
+  "EFNA1", "TAP1", "TAP2", 
+  "TAPBP", "PDIA3", "CALR", "CANX", 
+  "HSPA5", "TPP2", "ERAP1", "ERAP2", 
+  "PSMB10", "PSMB9", "PSMB8"
+)
+```
+
+```{r apc_mut_pats}
+apc_mut_pats <- maf_nonsilent_df %>% 
+  filter(Hugo_Symbol %in% apc_genes) %>% 
+  filter(!(Variant_Classification %in% c("Silent", "Intron", "3'UTR", "5'UTR"))) %>% 
+  group_by(participant) %>% 
+  count() %>% 
+  ungroup() %>% 
+  .$participant
+```
+
+```{r}
+
+bulk_clin_metadata %>% 
+  mutate(has_apc_mut = case_when(
+    patient %in% apc_mut_pats ~ TRUE, 
+    patient %in% maf_participants ~ FALSE, 
+    TRUE ~ NA
+  )) %>% 
+  select(has_apc_mut, immune_hi.v.lo) %>% 
+  table()
+
+```
+
+```{r}
+muts <- matrix(
+  c(38, 25, 67, 40),
+  nrow = 2,
+  dimnames =
+    list(c("immunehigh", "immunelow"), c("apc_mut", "rest"))
+)
+
+print(muts)
+fisher.test(muts)
+```
+
+## BRAF muts
+
+```{r}
+braf_df <- maf_nonsilent_df %>% 
+  filter(Hugo_Symbol == "BRAF")
+braf_df_participants <- braf_df$participant
+maf_participants <- maf_df$participant
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(patient %in% maf_participants) %>% 
+  filter(!(patient %in% braf_df_participants)) %>% 
+  filter(str_detect(prior_therapy, "d\\+t|LGX\\+MEK|BRAF|Dabra|panRAF"))
+```
+
+
+```{r, fig.asp = 0.8, fig.width = 5}
+plot_df <- bulk_clin_metadata %>% 
+  mutate(has_braf_mut = case_when(
+    patient %in% braf_df_participants ~ TRUE, 
+    patient %in% maf_participants ~ FALSE, 
+    TRUE ~ NA
+  )) %>% 
+  mutate(prior_therapies_grouped = case_when(
+    # !has_braf_mut ~ NA_character_, 
+    str_detect(prior_therapy, "d\\+t|LGX\\+MEK|BRAF|Dabra|panRAF") ~ "BRAFi/panRAF", 
+    prior_therapy == "none" ~ "none/unknown", 
+    TRUE ~ "other prior"
+  )) %>% 
+  drop_na(has_braf_mut) %>% 
+  drop_na(immune_zscore) 
+n_samples <- nrow(plot_df)
+plot_df %>% 
+  ggplot() + 
+  aes(has_braf_mut, immune_zscore) + 
+  geom_boxplot(fill = "grey") + 
+  geom_jitter(width = 0.2, size = 1, aes(color = prior_therapies_grouped)) +
+  stat_compare_means(comparisons = list(c("TRUE", "FALSE")), 
+                     method = "wilcox.test") + 
+  labs(caption = sprintf("n=%d samples", n_samples)) + 
+  remove_x_spine()
+```
+
+
+```{r}
+bulk_clin_metadata %>%
+  mutate(has_braf_mut = case_when(
+    patient %in% braf_df_participants ~ TRUE,
+    patient %in% maf_participants ~ FALSE,
+    TRUE ~ NA
+  )) %>%
+  select(has_braf_mut, immune_hi.v.lo) %>%
+  table()
+```
+
+```{r}
+muts <- matrix(
+  c(49, 21, 56, 44),
+  nrow = 2,
+  dimnames =
+    list(c("immunehigh", "immunelow"), c("braf_mut", "rest"))
+)
+
+print(muts)
+fisher.test(muts)
+```
+

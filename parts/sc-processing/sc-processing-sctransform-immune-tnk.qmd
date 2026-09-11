@@ -1,0 +1,331 @@
+---
+title: "SCTransform T/NK cells"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-sctransform-immune-tnk")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+so <- subset(so_imm %>% set_idents("general_cluster_immune"), idents = "T cell")
+```
+
+# SCTransform
+
+```{r}
+so <- run_or_readRDS(
+  file.path(file_cache_dir, "so_immune_tnk.rds"), 
+  function() {
+    run_seurat_rna_workflow(
+      so,
+      run_SCT = TRUE,
+      resolutions = seq(0.1, 1, 0.1),
+      dims = 1:30
+    ) 
+  }
+)
+```
+
+
+```{r}
+metadata_df <- get_metadata_from_so(so)
+```
+
+## Clustering Analysis
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+
+metadata_df %>%
+  dplyr::select(-SCT_snn_res.1) %>%
+  pivot_longer(cols = str_subset(colnames(.), "SCT_snn_res")) %>%
+  plot_umap(color_str = "value", pointsize = 2.1) +
+  geom_text_repel(
+    aes(label = value),
+    data = ~ ..1 %>%
+      group_by(name, value) %>%
+      summarise(UMAP_1 = mean(UMAP_1), UMAP_2 = mean(UMAP_2))
+  ) +
+  facet_wrap( ~ name) +
+  theme(legend.position = "none")
+```
+
+```{r}
+metadata_df %>% 
+  plot_umap(color_str = "sample_ID", pointsize = 2.1)
+```
+
+```{r}
+genes <- c("CD3E", "CD4", "CD8A", "FOXP3", "IKZF2", "TOX")
+gene_df <- get_gene_expr_from_so(so, gene_vec = genes)
+metadata_df %>% 
+  left_join(gene_df, by = "cell") %>% 
+  pivot_longer(cols = genes) %>% 
+  plot_umap(color_str = "value", pointsize = 2.1) + 
+  facet_wrap(~name) + 
+  scale_color_viridis()
+```
+
+
+Clearly we're having some problems with sample-specific effects (for instance, note that while the Tregs are clustered near each other in the UMAP, there is not clustering solution which can neatly divide them). 
+```{r, fig.asp = 1}
+#| fig-asp: 1
+metadata_df %>% 
+  left_join(gene_df, by = "cell") %>% 
+  pivot_longer(cols = colnames(.) %>% str_subset("SCT_snn_res")) %>% 
+  plot_violin(group = value, var = FOXP3) + 
+  facet_grid(name ~ .) + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, vjust = 0.5))
+```
+
+# SCTransform, with integration
+
+```{r}
+so_integrated <- run_or_readRDS(
+  file.path(file_cache_dir, "so_immune_tnk_integrated.rds"), 
+  function() {
+    so_list <-
+      subset(so_imm %>% set_idents("general_cluster_immune"), idents = "T cell") %>%
+      SplitObject(split.by = "patient.clin") %>%
+      map(SCTransform)
+    # remove 2 samples with fewer than 100 cells.
+    so_list[["880"]] <- NULL
+    so_list[["946"]] <- NULL
+    features <- SelectIntegrationFeatures(object.list = so_list,
+                                          nfeatures = 3000)
+    so_list <-
+      PrepSCTIntegration(object.list = so_list,
+                         anchor.features = features)
+    immune.anchors <-
+      FindIntegrationAnchors(
+        object.list = so_list,
+        dims = 1:15,
+        normalization.method = "SCT",
+        anchor.features = features
+      )
+    so_integrated <- IntegrateData(
+      anchorset = immune.anchors,
+      normalization.method = "SCT",
+      k.weight = 50
+    )
+    so_integrated <-
+      run_seurat_rna_workflow(
+        so_integrated,
+        set_percentages = FALSE,
+        run_normalize = FALSE,
+        run_SCT = FALSE,
+        dims = 1:30
+      )
+    so_integrated <- PrepSCTFindMarkers(so_integrated)
+    return(so_integrated)
+  }
+)
+
+```
+
+
+```{r}
+metadata_df <- so_integrated %>% 
+  get_metadata_from_so()
+```
+
+## Clustering Analysis
+
+```{r, fig.asp = 0.33}
+#| fig-asp: 0.33
+
+metadata_df %>%
+  pivot_longer(cols = str_subset(colnames(.), "integrated_snn_res")) %>%
+  plot_umap(color_str = "value", pointsize = 2.1) +
+  geom_text_repel(
+    aes(label = value),
+    data = ~ ..1 %>%
+      group_by(name, value) %>%
+      summarise(UMAP_1 = mean(UMAP_1), UMAP_2 = mean(UMAP_2))
+  ) +
+  facet_wrap( ~ name) +
+  theme(legend.position = "none")
+```
+
+```{r}
+metadata_df %>% 
+  plot_umap(color_str = "sample_ID", pointsize = 2.1)
+```
+
+```{r}
+metadata_df %>% 
+  plot_umap(color_str = "nFeature_RNA", pointsize = 2.1)
+metadata_df %>% 
+  filter(nFeature_RNA > 1000) %>% 
+  plot_umap(color_str = "nFeature_RNA", pointsize = 2.1)
+```
+
+```{r}
+so_integrated <- set_assay(so_integrated, "RNA")
+genes <- c("CD3E", "CD8B", "CD4", "FOXP3", "TOX", "MKI67")
+gene_df <- get_gene_expr_from_so(so_integrated, assay = "RNA", gene_vec = genes)
+metadata_df %>% 
+  left_join(gene_df, by = "cell") %>% 
+  pivot_longer(cols = genes) %>% 
+  plot_umap(color_str = "value", pointsize = 3.1) + 
+  facet_wrap(~name)
+```
+
+
+### Markers res 0.5
+
+```{r}
+markers_res0.5 <- run_or_readRDS(
+  file.path(file_cache_dir, "dge_one.v.all_res0.5.rds"), 
+  function() {
+    FindAllMarkers(so_integrated %>% set_assay("SCT") %>% set_idents("integrated_snn_res.0.5"), 
+                   assay = "SCT")
+  }
+)
+markers_res0.5_df <- markers_res0.5 %>% 
+  as_tibble()
+```
+
+```{r}
+markers_res0.5_wide <- markers_res0.5_df %>% 
+  filter(p_val_adj < 0.05) %>% 
+  filter(avg_log2FC > 0) %>% 
+  group_by(cluster) %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  mutate(rank = row_number()) %>% 
+  pivot_wider(id_cols = rank, 
+              names_from = cluster, 
+              values_from = gene) %>% 
+  {.[, c("rank", sort(as.character(colnames(.)[-1])))]}
+datatable(markers_res0.5_wide)
+```
+
+```{r}
+res0.5_key <- c(
+  "0: Activated CD8+ T", 
+  "1: Naive-like T", 
+  "2: Stressed", 
+  "3: Mito-high", 
+  "4: Tregs", 
+  "5: NK cells", 
+  "6: Naive-like T", 
+  "7: Proliferating", 
+  "8: Naive-like T"
+) %>% 
+  set_names(0:8)
+
+metadata_to_add <- 
+  get_metadata_from_so(so_integrated, metadata = "integrated_snn_res.0.5", reduction = NULL) %>% 
+  mutate(clusters_T = res0.5_key[as.character(integrated_snn_res.0.5)]) %>% 
+  mutate(general_clusters_T = case_when(
+    clusters_T %>% str_detect("Naive") ~ "Naive-like T", 
+    clusters_T %>% str_detect("CD8") ~ "CD8+ T", 
+    clusters_T %>% str_detect("Tregs") ~ "Tregs",  
+    clusters_T %>% str_detect("NK") ~ "NK",
+    clusters_T %>% str_detect("Proliferating") ~ "Proliferating",
+    TRUE ~ "Poor quality"
+  )) %>% 
+  select(-integrated_snn_res.0.5) %>% 
+  column_to_rownames("cell")
+so_integrated <- AddMetaData(so_integrated, metadata = metadata_to_add)
+```
+
+```{r}
+get_metadata_from_so(so_integrated) %>% 
+  plot_umap(color_str = "clusters_T", label = T, pointsize = 3.1)
+get_metadata_from_so(so_integrated) %>% 
+  plot_umap(color_str = "general_clusters_T", label = T, pointsize = 3.1)
+```
+
+
+
+### Markers res 0.9
+
+```{r}
+markers_res0.9 <- run_or_readRDS(
+  file.path(file_cache_dir, "dge_one.v.all_res0.9.rds"), 
+  function() {
+    FindAllMarkers(so_integrated %>% set_assay("SCT") %>% set_idents("integrated_snn_res.0.9"), 
+                   assay = "SCT")
+  }
+)
+markers_res0.9_df <- markers_res0.9 %>% 
+  as_tibble()
+```
+
+```{r}
+markers_res0.9_wide <- markers_res0.9_df %>% 
+  filter(p_val_adj < 0.05) %>% 
+  filter(avg_log2FC > 0) %>% 
+  group_by(cluster) %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  mutate(rank = row_number()) %>% 
+  pivot_wider(id_cols = rank, 
+              names_from = cluster, 
+              values_from = gene) %>% 
+  {.[, c("rank", sort(as.integer(as.character(colnames(.)[-1]))))]}
+datatable(markers_res0.9_wide)
+```
+
+```{r}
+res0.9_key <- c(
+  "0: Stressed",
+  "1: Naive-like T",
+  "2: Effector CD8+ T",
+  "3: Mito-high",
+  "4: Exhausted CD8+ T",
+  "5: NK cells",
+  "6: Naive-like T",
+  "7: Tregs",
+  "8: Naive-like T", 
+  "9: Naive-like T",
+  "10: Naive-like T", 
+  "11: Proliferating", 
+  "12: Stressed"
+) %>%
+  set_names(0:12)
+
+metadata_to_add <-
+  get_metadata_from_so(so_integrated, metadata = "integrated_snn_res.0.9", reduction = NULL) %>%
+  mutate(clusters_T = res0.9_key[as.character(integrated_snn_res.0.9)]) %>%
+  mutate(clusters_T = fct_reorder(clusters_T, as.integer(as.character(integrated_snn_res.0.9)))) %>% 
+  mutate(general_clusters_T = case_when(
+    clusters_T %>% str_detect("Naive") ~ "Naive-like T",
+    clusters_T %>% str_detect("CD8") ~ "CD8+ T",
+    clusters_T %>% str_detect("Tregs") ~ "Tregs",
+    clusters_T %>% str_detect("NK") ~ "NK",
+    clusters_T %>% str_detect("Proliferating") ~ "Proliferating",
+    TRUE ~ "Stressed"
+  )) %>%
+  select(-integrated_snn_res.0.9) %>%
+  column_to_rownames("cell")
+so_integrated <- AddMetaData(so_integrated, metadata = metadata_to_add)
+```
+
+```{r}
+get_metadata_from_so(so_integrated) %>%
+  plot_umap(color_str = "clusters_T", label = T, pointsize = 3.1)
+get_metadata_from_so(so_integrated) %>%
+  plot_umap(color_str = "general_clusters_T", label = T, pointsize = 3.1)
+```
+
+# Save
+
+```{r}
+saveRDS(so_integrated, file.path(file_cache_dir, "so_immune_tnk_integrated.rds"))
+```
+

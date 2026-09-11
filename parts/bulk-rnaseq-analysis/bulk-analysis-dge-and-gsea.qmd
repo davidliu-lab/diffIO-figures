@@ -1,0 +1,207 @@
+---
+title: "DGE + GSEA"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+# document specific packages: 
+library(liger)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-dge-and-gsea")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  drop_na(sample_RNA) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna))
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds"))
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "gene", 
+               values_to = "value")
+```
+
+```{r}
+bulk_clin_metadata_dge <- bulk_clin_metadata %>%
+  mutate(responder = case_when(
+    response == "R" ~ 1, 
+    response == "NR" ~ 0, 
+    TRUE ~ NA_integer_
+  )) %>% 
+  drop_na(responder) %>% 
+  dplyr::select(sample_RNA, responder, treatment)
+
+bulk_clin_metadata_dge %>%
+  group_by(responder, treatment) %>% 
+  count() %>% 
+  pivot_wider(id_cols = c(responder), 
+              names_from = treatment, 
+              values_from = n, 
+              values_fill = 0)
+```
+
+# Run DGE by treatment
+
+## Run DGE with custom functions
+
+```{r}
+dge_treatment_df <- run_or_readRDS(
+  file.path(file_cache_dir, "dge_R.v.NR_by_treatment.rds"), 
+  function() {
+    run_dge_split(
+      tpm_tidy,
+      bulk_clin_metadata_dge,
+      responder,
+      sample_RNA,
+      treatment
+    )
+  }
+)
+```
+
+## No significant results
+
+At a threshold of FDR less than 0.05, there are no significant genes across all groups. 
+
+```{r}
+dge_treatment_df %>% 
+  filter(p_BH < 0.05)
+```
+
+If we apply a more generous filter (FDR less then 0.25), we are still unable to find significantly differentially expressed genes. 
+
+```{r}
+dge_treatment_df %>% 
+  filter(p_BH < 0.25)
+```
+
+# Gene Set Enrichment Analysis
+
+## Read in gene sets
+
+```{r}
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+```
+
+## Run GSEA using liger
+
+```{r}
+gsea_treatment_df <- run_or_readRDS(
+  file.path(file_cache_dir, "gsea_R.v.NR_by_treatment.rds"), 
+  function() {
+    dge_list <- dge_treatment_df %>% 
+      arrange(desc(signed_neglog10_p)) %>% 
+      named_group_split(treatment) %>% 
+      map(~set_names(.$signed_neglog10_p, .$gene))
+    gsea_list <- dge_list %>% 
+      map(iterative.bulk.gsea, set.list = gs_vec, power = 0)
+    gsea_df <- gsea_list %>% 
+      map_dfr(as_tibble, rownames = "gs_name", .id = "treatment")
+  }
+)
+```
+
+```{r}
+gsea_treatment_df %>% 
+  filter(q.val < 0.05) %>% 
+  mutate(direction = ifelse(sscore > 0, "R", "NR")) %>% 
+  group_by(treatment, direction) %>% 
+  count() %>% 
+  pivot_wider(id_cols = c(treatment), 
+              names_from = direction, 
+              values_from = n) %>% 
+  mutate(total_signif = NR + R)
+```
+
+## GSEA results
+
+```{r}
+gsea_treatment_df %>% 
+  named_group_split(treatment) %>% 
+  imap(~{
+    ..1 %>%
+      mutate(direction = ifelse(sscore > 0, "R", "NR")) %>%
+      ggplot() +
+      aes(fct_reorder(gs_name, sscore), sscore, color = q.val < 0.05) +
+      geom_point(shape = "|", size = 3) +
+      geom_text_repel(aes(label = gs_name),
+                data = ~ ..1 %>%
+                  filter(q.val < 0.05) %>% 
+                  filter(direction == "R") %>% 
+                  slice_max(abs(sscore), n = 4), 
+                hjust = 1) +
+      geom_text_repel(aes(label = gs_name),
+                data = ~ ..1 %>%
+                  filter(q.val < 0.05) %>% 
+                  filter(direction == "NR") %>% 
+                  slice_max(abs(sscore), n = 4), 
+                hjust = 1) +
+      scale_color_manual(values = palette_bool) +
+      remove_x_spine() +
+      theme(axis.text.x = element_blank()) + 
+      labs(title = ..2)
+  })
+```
+
+```{r}
+gsea_treatment_wide <- gsea_treatment_df %>% 
+  pivot_wider(id_cols = gs_name, 
+              names_from = treatment, 
+              values_from = c(sscore, q.val))
+```
+
+```{r}
+p <- gsea_treatment_wide %>% 
+  ggplot() + 
+  aes(sscore_aCTLA4, sscore_combo, 
+      label = gs_name, 
+      shape = q.val_aCTLA4 < 0.05 & q.val_combo < 0.05) + 
+  geom_point(size = 3) + 
+  theme(legend.position = "none") + 
+  scale_shape_manual(values = c(4, 19)) +
+  geom_point(size = 3, color = "red",
+             data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA"))
+ggplotly(p)
+```
+
+```{r}
+p <- gsea_treatment_wide %>% 
+  ggplot() + 
+  aes(sscore_aPD1, sscore_combo, 
+      label = gs_name, 
+      shape = q.val_aPD1 < 0.05 & q.val_combo < 0.05) + 
+  geom_point(size = 3) + 
+  theme(legend.position = "none") + 
+  scale_shape_manual(values = c(4, 19)) +
+  geom_point(size = 3, color = "red",
+             data = ~..1 %>% filter(gs_name == "HALLMARK_HYPOXIA"))
+ggplotly(p)
+```
+
+# Save
+
+```{r}
+if (!file.exists(file.path(results_dir, "dge_treatment.tsv"))) {
+  write_tsv(
+    dge_treatment_df,
+    file.path(results_dir, "dge_treatment.tsv")
+  )
+}
+if (!file.exists(file.path(results_dir, "gsea_treatment.tsv"))) {
+  write_tsv(
+    gsea_treatment_df,
+    file.path(results_dir,
+              "gsea_treatment.tsv")
+  )
+}
+```
+

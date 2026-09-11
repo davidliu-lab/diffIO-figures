@@ -1,0 +1,120 @@
+---
+title: "Effect of prior BRAF"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+# document specific packages: 
+library(GSVA)
+library(liger)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-prior-braf")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  drop_na(sample_RNA) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  mutate(prior_BRAF = case_when(
+    str_detect(prior_therapy, "BRAF|dabrafenib|Dabra|Braf") ~ "BRAF", 
+    cohort == "2019 Gide" & sample_RNA == "ipiPD1_14_PRE_R1" ~ "BRAF", 
+    cohort == "2019 Gide" & sample_RNA == "ipiPD1_17_PRE_R1" ~ "BRAF", 
+    prior_therapy == "unknown" ~ "unknown", 
+    TRUE ~ "no BRAF"
+  ))
+
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds")) %>% 
+  filter(sample_RNA %in% bulk_clin_metadata$sample_RNA)
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "gene", 
+               values_to = "value")
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("sample_RNA") %>% 
+  as.matrix() %>% 
+  t() 
+
+signature_df <- read_excel(
+  file.path(data_dir, "signatures", "1-s2.0-S1535610821002221-mmc2.xlsx"), 
+  sheet = "Gene Description", 
+  skip = 1
+) %>% mutate(Gene = str_replace(Gene, "-", "."))
+
+signature_list <- signature_df %>% 
+  named_group_split(`Gene signature`) %>% 
+  map(~.$Gene) 
+
+ssgsea_df <- read_tsv(file.path(results_dir, "ssgsea_df.tsv")) 
+hypoxia_df <- ssgsea_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample_RNA") %>% 
+  filter(gs_name == "HALLMARK_HYPOXIA")
+angio_df <- ssgsea_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample_RNA") %>% 
+  filter(gs_name == "HALLMARK_ANGIOGENESIS")
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  group_by(prior_BRAF) %>% 
+  count()
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(treatment %in% c("aPD1", "combo")) %>% 
+  group_by(prior_BRAF, response_splitSD) %>% 
+  count()
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(treatment %in% c("aPD1", "combo")) %>% 
+  drop_na(response_splitSD) %>% 
+  group_by(prior_BRAF, immune_hi.v.lo, response_splitSD) %>% 
+  count()
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(treatment %in% c("aPD1", "combo")) %>% 
+  drop_na(response_splitSD) %>% 
+  left_join(hypoxia_df, by = "sample_RNA") %>% 
+  ggplot() + 
+  aes(response_splitSD, value, color = response_splitSD) + 
+  geom_boxplot(outlier.size = 0, outlier.stroke = 0) + 
+  geom_jitter(size = 3, width = 0.2) + 
+  facet_grid(~prior_BRAF) + 
+  stat_compare_means(method = "t.test") + 
+  labs(y = "hypoxia ssGSEA score")
+```
+
+```{r}
+
+bulk_clin_metadata %>% 
+  filter(treatment %in% c("aPD1", "combo")) %>% 
+  drop_na(response_splitSD) %>% 
+  left_join(angio_df, by = "sample_RNA") %>% 
+  ggplot() + 
+  aes(response_splitSD, value, color = response_splitSD) + 
+  geom_boxplot(outlier.size = 0, outlier.stroke = 0) + 
+  geom_jitter(size = 3, width = 0.2) + 
+  facet_grid(~prior_BRAF) + 
+  stat_compare_means(method = "t.test") + 
+  labs(y = "angiogenesis ssGSEA score")
+```
+
+
+
+
+

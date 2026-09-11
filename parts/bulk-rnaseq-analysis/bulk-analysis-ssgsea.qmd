@@ -1,0 +1,333 @@
+---
+title: "ssGSEA analysis"
+execute: 
+  freeze: true 
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+# document specific packages: 
+library(GSVA)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-ssgsea")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  drop_na(sample_RNA) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA")
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds")) %>% 
+  filter(sample_RNA %in% bulk_clin_metadata$sample_RNA)
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("sample_RNA") %>% 
+  as.matrix() %>% 
+  t()
+```
+
+```{r}
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+hypoxia_vec <- readRDS(file.path(results_dir, "hypoxia_gs_vec.rds"))
+```
+
+# Run ssGSEA
+
+## On broad set of signatures
+
+```{r}
+ssgsea_df <- run_or_readRDS(
+  file.path(file_cache_dir, "ssgsea.rds"), 
+  function() {
+    gsva(
+      tpm_matrix,
+      gset.idx.list = gs_vec,
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+ssgsea_tidy <- ssgsea_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_RNA", values_to = "score") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup()
+write_tsv(ssgsea_df, file.path(results_dir, "ssgsea_df.tsv"))
+saveRDS(ssgsea_tidy, file.path(results_dir, "ssgsea_tidy.rds"))
+```
+
+# On extra hypoxia signatures
+
+```{r}
+ssgsea_hypoxia_df <- run_or_readRDS(
+  file.path(file_cache_dir, "ssgsea_hypoxia.rds"), 
+  function() {
+    gsva(
+      tpm_matrix,
+      gset.idx.list = hypoxia_vec,
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+ssgsea_hypoxia_tidy <- ssgsea_hypoxia_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_RNA", values_to = "score") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup()
+write_tsv(ssgsea_hypoxia_df, file.path(results_dir, "ssgsea_hypoxia_df.tsv"))
+saveRDS(ssgsea_hypoxia_tidy, file.path(results_dir, "ssgsea_hypoxia_tidy.rds"))
+```
+
+# View all results
+
+```{r}
+h_mtx <- ssgsea_tidy %>% 
+  pivot_wider(id_cols = NAME, 
+              names_from = sample_RNA, 
+              values_from = zscore) %>% 
+  column_to_rownames("NAME") %>% 
+  as.matrix()
+```
+
+```{r, fig.asp = 1/2, fig.width = 20}
+Heatmap(
+  h_mtx, 
+  name = "scaled score", 
+  show_row_names = TRUE, 
+  show_column_names = FALSE, 
+  row_names_gp = gpar(fontsize = 5)
+)
+```
+
+```{r, fig.width = 12}
+Heatmap(
+  cor(t(h_mtx), method = "pearson"), 
+  name = "pearson cor.", 
+  show_column_names = FALSE, 
+  row_names_gp = gpar(fontsize = 3), 
+  height = unit(6, "in"), 
+  width = unit(6, "in")
+)
+```
+
+# VS Response?
+
+```{r}
+ssgsea_tidy_clin <- ssgsea_tidy %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") %>% 
+  drop_na(patient, immune_hi.v.lo)
+```
+
+```{r}
+ssgsea_tidy_clin %>% 
+  drop_na(response) %>% 
+  filter(NAME == "HALLMARK_INTERFERON_GAMMA_RESPONSE") %>% 
+  ggplot() + 
+  aes(response, score) + 
+  geom_boxplot(outlier.size = 0, outlier.stroke = 0) + 
+  geom_jitter(width = 0.2) + 
+  stat_compare_means(comparison = list(c("R", "NR"))) + 
+  scale_y_continuous(expand = c(0, 0), limits = ~c(..1[1], ..1[2]*1.2)) + 
+  facet_grid(immune_hi.v.lo ~ treatment)
+```
+
+# Sanity checks
+
+## Hallmark IFNg response == More IFNg expression
+
+It's not trivial to detect IFNg transcriptionally (most cytokines are very transient), but, reassuringly, the expression of this signatures correlates very nicely with IFNG expression. 
+
+```{r}
+ifng_df <- tpm_df %>% 
+  select(sample_RNA, IFNG)
+ssgsea_tidy_clin %>% 
+  filter(NAME == "HALLMARK_INTERFERON_GAMMA_RESPONSE") %>% 
+  left_join(ifng_df, by = "sample_RNA") %>% 
+  ggplot() + 
+  aes(score, IFNG, color = immune_hi.v.lo) + 
+  geom_point(size = 2, alpha = 0.5) + 
+  stat_cor(method = "spearman") + 
+  scale_color_manual(values = palette_immune_state)
+```
+
+# plot by treatment and response 
+
+```{r}
+plot_ssgsea_by_treatment_and_response <- function(ssgsea_tidy, gs_str) {
+  ssgsea_tidy %>%
+    filter(NAME == gs_str) %>%
+    drop_na(response) %>%
+    ggplot() +
+    aes(response, score) +
+    geom_violin(scale = "width", draw_quantiles = 0.5) +
+    geom_jitter(width = 0.2) +
+    facet_grid( ~ treatment) +
+    theme(axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5
+    )) +
+    stat_compare_means(comparisons = list(c("NR", "R"))) +
+    remove_x_spine() + 
+    labs(title = gs_str)
+}
+plot_ssgsea_by_treatment_and_response(ssgsea_tidy_clin, "HALLMARK_HYPOXIA")
+plot_ssgsea_by_treatment_and_response(ssgsea_tidy_clin, "HALLMARK_ANGIOGENESIS")
+plot_ssgsea_by_treatment_and_response(ssgsea_tidy_clin, "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION")
+plot_ssgsea_by_treatment_and_response(ssgsea_tidy_clin, "HALLMARK_INTERFERON_GAMMA_RESPONSE")
+```
+
+# Extra hypoxia signatures
+
+```{r}
+ssgsea_hypoxia_tidy_clin <- 
+  ssgsea_hypoxia_tidy %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") 
+
+ssgsea_hypoxia_tidy_clin %>% 
+  plot_ssgsea_by_treatment_and_response("BUFFA_HYPOXIA_METAGENE") + 
+  facet_wrap( ~ immune_hi.v.lo + treatment, ncol = 4, scale = "free_y") + 
+  scale_y_continuous(expand = c(0.2, 0))
+
+ssgsea_hypoxia_tidy_clin %>% 
+  plot_ssgsea_by_treatment_and_response("HARRIS_HYPOXIA") + 
+  facet_wrap( ~ immune_hi.v.lo + treatment, ncol = 4, scale = "free_y") + 
+  scale_y_continuous(expand = c(0.2, 0))
+
+ssgsea_hypoxia_tidy_clin %>% 
+  plot_ssgsea_by_treatment_and_response("WINTER_HYPOXIA_METAGENE") + 
+  facet_wrap( ~ immune_hi.v.lo + treatment, ncol = 4, scale = "free_y") + 
+  scale_y_continuous(expand = c(0.2, 0))
+```
+
+# Florian / RambowHYPERDiff
+
+```{r}
+data_dir
+florian_sig_df <- read_tsv(file.path(data_dir, "signatures", "lista_signatures_florian_mod.tsv"))
+hyperdiff_gs <- florian_sig_df$RambowHYPERdiff
+hyperdiff_gs <- hyperdiff_gs[!is.na(hyperdiff_gs)]
+```
+
+```{r}
+florian_df <- run_or_readRDS(
+  file.path(file_cache_dir, "florian.rds"), 
+  function() {
+    gsva(
+      tpm_matrix,
+      gset.idx.list = list(RambowHYPERdiff = hyperdiff_gs),
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+florian_tidy <- florian_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_RNA", values_to = "score") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup()
+```
+
+```{r, fig.asp = 1/2, fig.width = 7}
+florian_tidy %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") %>% 
+  drop_na(response_splitSD) %>% 
+  ggplot() + 
+  aes(response_splitSD, score) +
+  geom_boxplot(aes(fill = response_splitSD), 
+               outlier.stroke = 0, 
+               outlier.size = 0) + 
+  geom_jitter(size = 2, shape = 1, width = 0.2) + 
+  facet_grid(~treatment) + 
+  stat_compare_means(comparisons = list(c("NR", "R"))) + 
+  theme(legend.position = "none") + 
+  remove_x_spine() + 
+  scale_y_continuous(limits = ~c(..1[1], ..1[2]*1.1)) + 
+  scale_fill_manual(values = palette_response) + 
+  labs(x = "response", y = "ssGSEA score", title = "RambowHYPERdiff")
+```
+
+```{r, fig.asp = 1/2, fig.width = 7}
+florian_tidy %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") %>% 
+  drop_na(response) %>% 
+  ggplot() + 
+  aes(response, score) +
+  geom_boxplot(aes(fill = response_splitSD), 
+               outlier.stroke = 0, 
+               outlier.size = 0) + 
+  geom_jitter(size = 2, shape = 1, width = 0.2) + 
+  facet_grid(~treatment) + 
+  stat_compare_means(comparisons = list(c("NR", "R"))) + 
+  theme(legend.position = "none") + 
+  remove_x_spine() + 
+  scale_y_continuous(limits = ~c(..1[1], ..1[2]*1.1)) + 
+  scale_fill_manual(values = palette_response) + 
+  labs(x = "response (drop all SD)", 
+       y = "ssGSEA score", title = "RambowHYPERdiff")
+```
+
+```{r, fig.asp = 1/4, fig.width = 11}
+florian_tidy %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") %>% 
+  drop_na(response_splitSD) %>% 
+  filter(treatment == "aPD1") %>% 
+  ggplot() + 
+  aes(response_splitSD, score) +
+  geom_boxplot(aes(fill = response_splitSD), 
+               outlier.stroke = 0, 
+               outlier.size = 0) + 
+  geom_jitter(size = 2, shape = 1, width = 0.2) + 
+  facet_grid(~cohort) + 
+  stat_compare_means(comparisons = list(c("NR", "R"))) + 
+  theme(legend.position = "none") + 
+  remove_x_spine() + 
+  scale_y_continuous(limits = ~c(..1[1], ..1[2]*1.1)) + 
+  scale_fill_manual(values = palette_response) + 
+  labs(x = "response", 
+       y = "ssGSEA score", title = "RambowHYPERdiff (aPD1 only)")
+```
+
+```{r, fig.asp = 1/4, fig.width = 11}
+florian_tidy %>% 
+  left_join(bulk_clin_metadata, by = "sample_RNA") %>% 
+  drop_na(response) %>% 
+  filter(treatment == "aPD1") %>% 
+  ggplot() + 
+  aes(response, score) +
+  geom_boxplot(aes(fill = response), 
+               outlier.stroke = 0, 
+               outlier.size = 0) + 
+  geom_jitter(size = 2, shape = 1, width = 0.2) + 
+  facet_grid(~cohort) + 
+  stat_compare_means(comparisons = list(c("NR", "R"))) + 
+  theme(legend.position = "none") + 
+  remove_x_spine() + 
+  scale_y_continuous(limits = ~c(..1[1], ..1[2]*1.1)) + 
+  scale_fill_manual(values = palette_response) + 
+  labs(x = "response (drop all SD)", 
+       y = "ssGSEA score", title = "RambowHYPERdiff (aPD1 only)")
+```
+
+
+
+

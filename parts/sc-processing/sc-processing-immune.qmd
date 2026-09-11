@@ -1,0 +1,118 @@
+---
+title: "scRNAseq Immune High VS Low"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-immune")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Set up
+
+```{r}
+umap_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_umap.csv"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(umap_df, by = "cell_label")
+```
+
+# Compartment
+
+```{r, fig.asp = 0.33}
+#| fig-asp: 0.33
+
+prop_df <- obs_df %>% 
+  Rsc::calculate_proportion(sample_ID, compartment) %>% 
+  arrange(compartment) 
+immune_prop_df <- prop_df %>% 
+  filter(compartment == "Immune") %>% 
+  arrange(prop) %>% 
+  mutate(immune_hi.v.lo = case_when(
+    prop < quantile(prop, 0.333) ~ "immune low", 
+    prop < quantile(prop, 0.666) ~ "immune mid", 
+    TRUE ~ "immune high"
+  )) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c("immune low", "immune mid", "immune high"))) %>% 
+  mutate(immune_hi.v.lo_median = case_when(
+    prop < quantile(prop, 0.5) ~ "immune low", 
+    TRUE ~ "immune high"
+  )) %>% 
+  mutate(immune_hi.v.lo_median = factor(immune_hi.v.lo_median, levels = c("immune low", "immune high")))
+
+prop_df %>% 
+  left_join(immune_prop_df, by = "sample_ID", suffix = c("", ".immune")) %>% 
+  Rsc::plot_prop(compartment, factor(sample_ID, levels = immune_prop_df$sample_ID)) + 
+  scale_fill_manual(values = palette_compartment) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  labs(x = "Sample", y = "Frequency") + 
+  facet_grid(~immune_hi.v.lo, scale = "free_x")
+
+```
+
+```{r}
+saveRDS(immune_prop_df, file.path(results_dir, "sc_immune_prop_df.rds"))
+write_tsv(immune_prop_df, file.path(results_dir, "sc_immune_prop_df.tsv"))
+```
+
+# General cell type
+
+```{r, fig.asp = 0.5}
+
+palette_specific_names <- obs_df %>% 
+  filter(compartment == "Immune") %>% 
+  drop_na(specific_cell_type) %>% 
+  filter(specific_cell_type != "Doublets") %>% 
+  filter(specific_cell_type != "Stressed") %>% 
+  .$specific_cell_type %>% 
+  unique() %>% 
+  sort()
+palette_specific <- set_names(
+  social_palette[1:length(palette_specific_names)], 
+  palette_specific_names
+)
+
+prop_df <- obs_df %>% 
+  filter(compartment == "Immune") %>% 
+  drop_na(specific_cell_type) %>% 
+  filter(specific_cell_type != "Doublets") %>% 
+  filter(specific_cell_type != "Stressed") %>% 
+  filter(specific_cell_type != "Contaminating") %>% 
+  Rsc::calculate_proportion(sample_ID, specific_cell_type) %>% 
+  arrange(specific_cell_type) 
+
+prop_df %>% 
+  left_join(select(immune_prop_df, sample_ID, immune_hi.v.lo), 
+            by = c("sample_ID")) %>% 
+  Rsc::plot_prop(specific_cell_type, factor(sample_ID)) + 
+  scale_fill_manual(values = palette_specific) +
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  labs(x = "Sample", y = "Frequency")  + 
+  facet_grid(~immune_hi.v.lo, scale = "free_x")
+```
+
+```{r, fig.asp = 1/2, fig.width = 8}
+prop_df %>% 
+  left_join(select(immune_prop_df, sample_ID, immune_hi.v.lo), 
+            by = c("sample_ID")) %>% 
+  ggplot() + 
+  aes(immune_hi.v.lo, prop) + 
+  geom_boxplot() + 
+  stat_compare_means(comparisons = list(c("immune low", "immune high"))) + 
+  facet_wrap(~specific_cell_type, scale = "free_y", ncol = 5) + 
+  scale_y_continuous(limits = ~c(0, ..1[2]*1.1)) + 
+  rotate_x_text()
+```
+
+
+
+

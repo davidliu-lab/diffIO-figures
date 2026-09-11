@@ -1,0 +1,271 @@
+---
+title: "Export Pretty Tables"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+supp_dir <- here("data", "supplementary_tables", "csvs")
+```
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  # filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  # drop_na(sample_RNA) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") %>% 
+  dplyr::select(-immune_hi.med.lo_zscore, -immune_hi.v.lo_zscore, -kcluster, 
+                -group)
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+ssgsea_df <- read_tsv(file.path(results_dir, "ssgsea_df.tsv"))
+ssgsea_tidy <- ssgsea_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample_RNA", 
+               values_to = "score") %>% 
+  group_by(gs_name) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup()
+
+dge_immune_df <- read_tsv(file.path(results_dir, "dge_treatment_immune_df.tsv"))
+gsea_immune_df <- read_tsv(file.path(results_dir, "gsea_R.v.NR_by_treatment_immune.tsv"))
+
+dge_df <- read_tsv(file.path(results_dir, "dge_treatment.tsv"))
+gsea_df <- read_tsv(file.path(results_dir, "gsea_treatment.tsv"))
+```
+
+# Tables
+
+1.  Full details of the meta-cohort
+2.  RNA metadata
+3.  Batch-corrected TPMs
+4.  DGE, immune stratified
+5.  GSEA, immune stratified
+6.  estimated effect of hypoxia per cell type
+7.  CellPhoneDB results
+
+# Supp 1
+
+Full details of the meta-cohort
+
+```{r}
+bulk_clin_metadata %>% colnames() 
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  mutate_at(c("age", "os_days", "pfs_days",
+              "censor_os_alive_1_dead_0", 'censor_pfs_event_1_progressed_0'),
+            as.integer) %>%  
+  dplyr::rename(response_noSD = response) %>% 
+  dplyr::rename(response = response_splitSD) %>% 
+  dplyr::select(-excluded_wes, -excluded_rna, -sequencing_modality, 
+                -immune_hi.v.lo, -immune_zscore) %>% 
+  write_excel_csv(file.path(supp_dir, "SupplementaryTable1.csv"))
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  group_by(sex) %>% 
+  count()
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  drop_na(sample_RNA) %>% 
+  group_by(sex) %>% 
+  count()
+```
+
+# Supp 2
+
+```{r}
+star_df <- readRDS(here("data", "bulk", "star_df.rds"))
+```
+
+```{r}
+read_tsv(here("data", "bulk", "bulk-rna-metadata.tsv")) %>% 
+  dplyr::select(sample_RNA, excluded_rna, sequencing_modality) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") %>% 
+  dplyr::select(-immune_hi.v.lo_zscore, -immune_hi.med.lo_zscore, -kcluster) %>% 
+  left_join(star_df, by = c("sample_RNA" = "sample")) %>% 
+  write_excel_csv(file.path(supp_dir, "SupplementaryTable2.csv"))
+```
+
+# Supp 3
+
+Batch-corrected TPMs (ComBat-seq), genes as rows and samples as columns.
+
+```{r}
+tpm_df_combatseq <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds"))
+```
+
+```{r}
+tpm_df_combatseq %>%
+  ungroup() %>%
+  pivot_longer(cols = -sample_RNA, names_to = "gene", values_to = "tpm") %>%
+  pivot_wider(names_from = sample_RNA, values_from = tpm) %>%
+  write_excel_csv(file.path(supp_dir, "SupplementaryTable3.csv"))
+```
+
+# Supp 4
+
+DGE, immune stratified
+
+```{r}
+dge_immune_df %>% 
+  colnames()
+```
+
+```{r}
+dge_immune_df_cleaned <- dge_immune_df %>% 
+  dplyr::select(treatment, immune_hi.v.lo, gene, p.value, p_BH, 
+                median_nr, median_r, med_fc, 
+                mean_cr, mean_r, avg_fc, 
+                signed_neglog10_p, 
+                n_R, n_NR)
+write_excel_csv(dge_immune_df_cleaned, 
+          file.path(supp_dir, "SupplementaryTable4.csv"))
+```
+
+# Supp 5
+
+```{r}
+gsea_immune_df %>% colnames()
+```
+
+```{r}
+write_excel_csv(gsea_immune_df, 
+          file.path(supp_dir, "SupplementaryTable5.csv"))
+```
+
+# Supp 6
+
+```{r}
+pb_ols <- readRDS(here(
+  "results",
+  "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified.rds"
+))  %>%
+  group_by(cell_type) %>%
+  mutate(padj = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+```
+
+```{r}
+pb_ols %>% 
+  write_excel_csv(file.path(supp_dir, "SupplementaryTable6.csv"))
+```
+
+# Supp 7
+
+```{r}
+cpdb_tidy_stromal.imm <- 
+  readRDS(file.path(results_dir, "cpdb_tidy_stromal.imm.rds"))
+```
+
+```{r}
+cpdb_wide <- cpdb_tidy_stromal.imm %>% 
+  pivot_wider(id_cols = c(id, id_cp_interaction, interacting_pair, 
+                          partner_a, partner_b, 
+                          gene_a, gene_b, secreted, 
+                          receptor_a, receptor_b, 
+                          annotation_strategy, 
+                          is_integrin), 
+              names_from = name, 
+              values_from = c(value.mean, value.pval))
+colnames(cpdb_wide) <- str_replace_all(colnames(cpdb_wide), fixed("Mac/mono"), "TAM")
+```
+
+
+```{r}
+cpdb_wide %>% 
+  write_excel_csv(file.path(supp_dir, "SupplementaryTable7.csv"))
+```
+
+# Additional tables
+
+Immune signatures + immune score modeling
+
+```{r}
+predict_df <- bulk_clin_metadata %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>%
+  drop_na(sample_RNA) %>%
+  select(sample_RNA, immune_zscore, immune_hi.v.lo, response_splitSD, treatment, cohort) %>% 
+  drop_na(response_splitSD) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c("immune low", "immune high"), ordered = TRUE)) %>% 
+  mutate(response = case_when(
+    response_splitSD == "R" ~ 1, 
+    response_splitSD == "NR" ~ 0
+  )) %>% 
+  mutate(treatment = factor(
+    treatment,
+    levels = c("aPD1", "aCTLA4", "combo"),
+    ordered = FALSE
+  )) %>% 
+  column_to_rownames("sample_RNA")
+```
+
+```{r}
+models <- list(
+  "response ~ 1",
+  "response ~ immune_zscore", 
+  "response ~ treatment", 
+  "response ~ treatment + immune_zscore", 
+  "response ~ treatment * immune_zscore"
+) %>% set_names()
+```
+
+```{r}
+glm_out_list <- models %>% 
+  map(~glm(formula(..1), data = predict_df, family = "binomial"))
+aic_df <- glm_out_list %>% 
+  map_dfr(~tibble(AIC = ..1$aic), .id = "variable") %>% 
+  arrange(AIC) %>% 
+  mutate(delta_AIC = AIC - min(AIC)) 
+print(aic_df)
+```
+
+```{r}
+immunescore_df <- broom::tidy(glm_out_list$`response ~ treatment * immune_zscore`)
+print(immunescore_df)
+```
+
+```{r}
+models <- list(
+  "response ~ 1",
+  "response ~ immune_hi.v.lo", 
+  "response ~ treatment", 
+  "response ~ treatment + immune_hi.v.lo", 
+  "response ~ treatment * immune_hi.v.lo"
+) %>% set_names()
+```
+
+```{r}
+glm_out_list <- models %>% 
+  map(~glm(formula(..1), data = predict_df, family = "binomial"))
+aic_df <- glm_out_list %>% 
+  map_dfr(~tibble(AIC = ..1$aic), .id = "variable") %>% 
+  arrange(AIC) %>% 
+  mutate(delta_AIC = AIC - min(AIC)) 
+print(aic_df)
+```
+
+```{r}
+immune_df <- broom::tidy(glm_out_list$`response ~ treatment * immune_hi.v.lo`)
+print(immune_df)
+```
+
+```{r}
+immune_df <- broom::tidy(glm_out_list$`response ~ treatment`)
+print(immune_df)
+```
+

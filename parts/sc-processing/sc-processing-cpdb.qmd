@@ -1,0 +1,357 @@
+---
+title: "CellPhoneDB Processing"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-cellphonedb")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Cell type specific
+
+## Read in
+
+```{r}
+cpdb_subdirs <- list.files(file.path(results_dir, "cpdb")) %>% 
+  str_subset("cpdb") %>% 
+  str_subset("10x_dir", negate = T)
+
+cpdb_compartment_means <- cpdb_subdirs %>% 
+  set_names() %>% 
+  map_dfr(~read_tsv(file.path(results_dir, "cpdb", ..1, "out", "cell_type_specific", "means.txt")), .id = "id")
+
+cpdb_compartment_pvals <- cpdb_subdirs %>% 
+  set_names() %>% 
+  map_dfr(~read_tsv(file.path(results_dir, "cpdb", ..1, "out", "cell_type_specific", "pvalues.txt")), .id = "id")
+
+cpdb_means_tidy <- cpdb_compartment_means %>% 
+  pivot_longer(cols = str_subset(colnames(.), "\\|"))
+cpdb_pvals_tidy <- cpdb_compartment_pvals %>% 
+  pivot_longer(cols = str_subset(colnames(.), "\\|"))
+cpdb_tidy <- cpdb_means_tidy %>%
+  left_join(
+    cpdb_pvals_tidy,
+    by = join_by(
+      id,
+      id_cp_interaction,
+      interacting_pair,
+      partner_a,
+      partner_b,
+      gene_a,
+      gene_b,
+      secreted,
+      receptor_a,
+      receptor_b,
+      annotation_strategy,
+      is_integrin,
+      name
+    ), 
+    suffix = c(".mean", ".pval")
+  )
+```
+
+## Export/save
+
+```{r}
+saveRDS(cpdb_tidy, file.path(results_dir, "cpdb_tidy.rds"))
+```
+
+# Properties
+
+```{r}
+cpdb_tidy$id_cp_interaction %>% unique() %>% length()
+cpdb_tidy$interacting_pair %>% unique() %>% length()
+```
+
+# Summarize total interactions
+
+For one sample
+
+```{r}
+summarize_total_ints <- function(cpdb_tidy, id_str) {
+  
+  h_mtx <- cpdb_tidy %>% 
+    filter(id == id_str) %>% 
+    mutate(significant = ifelse(is.na(value.pval), 
+                                FALSE, 
+                                value.pval < 0.05)) %>% 
+    group_by(name, significant) %>% 
+    count() %>% 
+    pivot_wider(id_cols = name, names_from = significant, values_from = n, 
+                values_fill = 0) %>% 
+    separate(name, into = c("c1", "c2"), sep = "\\|") %>% 
+    mutate(prop_sig = `TRUE` / (`TRUE` + `FALSE`) * 100) %>% 
+    pivot_wider(id_cols = c1, 
+                names_from = c2, 
+                values_from = prop_sig) %>% 
+    column_to_rownames("c1") %>% 
+    as.matrix() 
+  ht <- Heatmap(
+    h_mtx, 
+    col = colorRamp2(breaks = c(0, 10), 
+                     colors = palette_cor[-1]), 
+    name = "% signif. interaction", 
+    width = unit(2, "in"), 
+    height = unit(2, "in"), 
+    column_title = id_str
+  )
+  return(draw(ht))
+}
+
+```
+
+```{r}
+summarize_total_ints(cpdb_tidy, "cpdb_9129")
+```
+
+
+# Plot specific interactions
+
+```{r, fig.asp = 1}
+plot_interacting_pair <- function(cpdb_tidy, interacting_pair_str, 
+                                  cell_type_str) {
+  cpdb_tidy %>%
+    filter(interacting_pair == interacting_pair_str) %>%
+    filter(str_detect(name, cell_type_str)) %>%
+    drop_na(value.mean) %>%
+    mutate(sample_ID = str_remove(id, "cpdb_")) %>%
+    ggplot() +
+    aes(id, name, size = value.mean) +
+    geom_point(aes(color = -log10(value.pval + 1e-4))) +
+    geom_point(
+      shape = 1,
+      color = "red",
+      stroke = 2,
+      data = ~ ..1 %>%
+        filter(value.pval < 0.05)
+    ) +
+    scale_color_viridis() +
+    rotate_x_text() +
+    labs(title = interacting_pair_str) +
+    theme(legend.position = "bottom")
+}
+```
+
+## Plot several interacting pairs
+
+```{r, fig.asp = 1}
+plot_interacting_pair(cpdb_tidy, "VCAM1_integrin_a4b1_complex", "Tumor")
+plot_interacting_pair(cpdb_tidy, "CXCL8_CXCR2", "Neutrophil")
+plot_interacting_pair(cpdb_tidy, "CXCL8_CXCR1", "Neutrophil")
+plot_interacting_pair(cpdb_tidy, "CXCL8_ACKR1", "Neutrophil")
+plot_interacting_pair(cpdb_tidy, "CD40_CD40LG", "DC")
+plot_interacting_pair(cpdb_tidy, "CD40_CD40LG", "Mac.mono")
+```
+
+# Cell type specific, with stromal details
+
+## Read in 
+
+```{r}
+cpdb_subdirs <- list.files(file.path(results_dir, "cpdb")) %>% 
+  str_subset("cpdb") %>% 
+  str_subset("10x_dir", negate = T)
+
+cpdb_compartment_means <- cpdb_subdirs %>% 
+  set_names() %>% 
+  map_dfr(~read_tsv(file.path(results_dir, "cpdb", ..1, "out", "cell_type_specific_stromal_imm", "means.txt")), .id = "id")
+
+cpdb_compartment_pvals <- cpdb_subdirs %>% 
+  set_names() %>% 
+  map_dfr(~read_tsv(file.path(results_dir, "cpdb", ..1, "out", "cell_type_specific_stromal_imm", "pvalues.txt")), .id = "id")
+
+cpdb_means_tidy <- cpdb_compartment_means %>% 
+  pivot_longer(cols = str_subset(colnames(.), "\\|"))
+cpdb_pvals_tidy <- cpdb_compartment_pvals %>% 
+  pivot_longer(cols = str_subset(colnames(.), "\\|"))
+cpdb_tidy_stromal.imm <- cpdb_means_tidy %>%
+  left_join(
+    cpdb_pvals_tidy,
+    by = join_by(
+      id,
+      id_cp_interaction,
+      interacting_pair,
+      partner_a,
+      partner_b,
+      gene_a,
+      gene_b,
+      secreted,
+      receptor_a,
+      receptor_b,
+      annotation_strategy,
+      is_integrin,
+      name
+    ), 
+    suffix = c(".mean", ".pval")
+  )
+```
+
+## Export/save
+
+```{r}
+saveRDS(cpdb_tidy_stromal.imm, file.path(results_dir, "cpdb_tidy_stromal.imm.rds"))
+```
+
+# Properties
+
+```{r}
+cpdb_tidy_stromal.imm$id_cp_interaction %>% unique() %>% length()
+cpdb_tidy_stromal.imm$interacting_pair %>% unique() %>% length()
+```
+
+# Summarize total interactions
+
+```{r}
+cpdb_tidy_stromal.imm$id %>% unique() %>% 
+  map(~summarize_total_ints(cpdb_tidy_stromal.imm, ..1))
+```
+
+## Plot several interacting pairs
+
+```{r, fig.asp = 1}
+plot_interacting_pair(cpdb_tidy_stromal.imm, "VCAM1_integrin_a4b1_complex", "Tumor")
+plot_interacting_pair(cpdb_tidy_stromal.imm, "CXCL8_CXCR2", "Neutrophil")
+plot_interacting_pair(cpdb_tidy_stromal.imm, "CD40_CD40LG", "DC")
+plot_interacting_pair(cpdb_tidy_stromal.imm, "CD40_CD40LG", "Mac.mono")
+```
+
+## Examine top interactions
+
+```{r}
+cpdb_tidy_stromal.imm_sig_df <- cpdb_tidy_stromal.imm %>% 
+  group_by(id) %>% 
+  mutate(p_BH = p.adjust(value.pval, method = "BH")) %>% 
+  ungroup() %>% 
+  filter(p_BH < 0.05) %>% 
+  arrange(desc(value.mean))
+```
+
+Number of Fibroblast+Endothelial Interactions
+
+```{r}
+n_fibroblast_ints <- cpdb_tidy_stromal.imm_sig_df %>% 
+  filter(name %>% str_detect("Fibroblasts")) %>% 
+  mutate(int_with = str_remove(name, "Fibroblasts")) %>% 
+  mutate(int_with = str_remove(int_with, "\\|")) %>% 
+  group_by(id, int_with) %>% 
+  summarise(count = n()) 
+n_endothelial_ints <- cpdb_tidy_stromal.imm_sig_df %>% 
+  filter(name %>% str_detect("Endothelial")) %>% 
+  mutate(int_with = str_remove(name, "Endothelial cells")) %>% 
+  mutate(int_with = str_remove(int_with, "\\|")) %>% 
+  group_by(id, int_with) %>% 
+  summarise(count = n()) 
+```
+
+### plot against hypoxia
+
+Shows that in more hypoxic samples, there are more stromal-tumor interactions (both fibroblasts and endothelial cells). 
+
+```{r}
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+```
+
+```{r, fig.asp = 1, fig.width = 8}
+n_fibroblast_ints %>% 
+  mutate(sample_ID = str_remove(id, "cpdb_")) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  ggplot() + 
+  aes(mean_hypoxia, count.x) + 
+  geom_point(size = 2) + 
+  facet_wrap(~int_with, ncol = 4, scale = "free") + 
+  stat_smooth(method = "lm")  + 
+  stat_cor() + 
+  labs(y = "Number of signif. interaction", 
+       title = "With Fibroblasts")
+n_endothelial_ints %>% 
+  mutate(sample_ID = str_remove(id, "cpdb_")) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  ggplot() + 
+  aes(mean_hypoxia, count.x) + 
+  geom_point(size = 2) + 
+  facet_wrap(~int_with, ncol = 4, scale = "free") + 
+  stat_smooth(method = "lm") + 
+  stat_cor() + 
+  labs(y = "Number of signif. interaction", 
+       title = "With ECs")
+```
+
+### which interactions
+
+#### Fibroblasts, with Tumor
+
+```{r}
+cpdb_tidy_stromal.imm_sig_df %>% 
+  mutate(sample_ID = str_remove(id, "cpdb_")) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  filter(name == "Fibroblasts|Tumor" | name == "Tumor|Fibroblasts") %>% 
+  named_group_split(hypoxia_hi.v.lo) %>% 
+  map(~{
+    ..1 %>% 
+      group_by(name, interacting_pair) %>% 
+      summarise(n = n(), mean_mean_value = mean(value.mean)) %>% 
+      filter(n > 5)
+  })
+```
+
+#### Fibroblasts, with Myeloid
+
+```{r}
+cpdb_tidy_stromal.imm_sig_df %>% 
+  mutate(sample_ID = str_remove(id, "cpdb_")) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  filter(name == "Fibroblasts|DC" | name == "DC|Fibroblasts") %>% 
+  named_group_split(hypoxia_hi.v.lo) %>% 
+  map(~{
+    ..1 %>% 
+      group_by(name, interacting_pair) %>% 
+      summarise(n = n(), mean_mean_value = mean(value.mean)) %>% 
+      filter(n > 5)
+  })
+cpdb_tidy_stromal.imm_sig_df %>% 
+  mutate(sample_ID = str_remove(id, "cpdb_")) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  filter(name == "Fibroblasts|Mac/mono" | name == "Mac/mono|Fibroblasts") %>% 
+  named_group_split(hypoxia_hi.v.lo) %>% 
+  map(~{
+    ..1 %>% 
+      group_by(name, interacting_pair) %>% 
+      summarise(n = n(), mean_mean_value = mean(value.mean)) %>% 
+      filter(n > 5)
+  })
+```
+
+#### Endothelial, with Tumor
+
+```{r}
+cpdb_tidy_stromal.imm_sig_df %>% 
+  mutate(sample_ID = str_remove(id, "cpdb_")) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  filter(name == "Endothelial cells|Tumor" | name == "Tumor|Endothelial cells") %>% 
+  named_group_split(hypoxia_hi.v.lo) %>% 
+  map(~{
+    ..1 %>% 
+      group_by(name, interacting_pair) %>% 
+      summarise(n = n(), mean_mean_value = mean(value.mean)) %>% 
+      filter(n > 5)
+  })
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

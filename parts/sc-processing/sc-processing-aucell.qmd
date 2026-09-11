@@ -1,0 +1,191 @@
+---
+title: "AUCell signature scoring"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+library(AUCell)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-aucell")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+## Seurat objects 
+
+```{r}
+so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds"))
+so_tumor <- readRDS(file.path(cache_dir, "sc-processing-sctransform-tumor", "so_tumor.rds"))
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+```
+
+## Read in signature scores
+
+### Bagaev signatures
+
+```{r}
+signature_df <- read_excel(
+  file.path(data_dir, "signatures", "1-s2.0-S1535610821002221-mmc2.xlsx"), 
+  sheet = "Gene Description", 
+  skip = 1
+) %>% mutate(Gene = str_replace(Gene, "-", "."))
+
+signature_list <- signature_df %>% 
+  named_group_split(`Gene signature`) %>% 
+  map(~str_replace(.$Gene, "\\.", "-")) 
+```
+
+### Select Hallmarks signatures
+
+```{r}
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+select_gs <- c(
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE", 
+  "HALLMARK_INTERFERON_ALPHA_RESPONSE", 
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", 
+  "HALLMARK_ANGIOGENESIS", 
+  "HALLMARK_HYPOXIA"
+)
+select_gs_vec <- gs_vec[select_gs]
+```
+
+### Additional hypoxia signatures
+
+```{r}
+hypoxia_gs_vec <- readRDS(file.path(results_dir, "hypoxia_gs_vec.rds"))
+```
+
+# AUCell signature scoring
+
+## Stromal
+
+```{r}
+aucell_stromal <- run_or_readRDS(
+  file.path(file_cache_dir, "aucell_stromal_scores.rds"), 
+  function() {
+    AUCell_run(so_stromal@assays$SCT@data,
+               geneSets = c(signature_list, select_gs_vec))
+  }
+)
+```
+
+## Tumor
+
+```{r}
+aucell_tumor <- run_or_readRDS(
+  file.path(file_cache_dir, "aucell_tumor_scores.rds"), 
+  function() {
+    AUCell_run(so_tumor@assays$SCT@data,
+               geneSets = c(signature_list, select_gs_vec))
+  }
+)
+```
+
+## Immune
+
+```{r}
+aucell_imm <- run_or_readRDS(
+  file.path(file_cache_dir, "aucell_imm_scores.rds"), 
+  function() {
+    AUCell_run(so_imm@assays$SCT@data,
+               geneSets = c(signature_list, select_gs_vec))
+  }
+)
+```
+
+## Aggregate
+
+Just `cbind`ing the results should be fine, see this: https://github.com/aertslab/AUCell/issues/5
+
+```{r}
+aucell_all <- cbind(aucell_imm, aucell_tumor, aucell_stromal)
+cells_assignment <- AUCell_exploreThresholds(aucell_all, plotHist=TRUE, assign=TRUE) 
+```
+
+```{r}
+aucell_path <- file.path(results_dir, "adata_aucell_out.rds")
+if (!file.exists(aucell_path)) saveRDS(aucell_all, aucell_path)
+
+cell_assignment_path <- file.path(results_dir, "adata_aucell_assignment.rds")
+if (!file.exists(cell_assignment_path)) saveRDS(cells_assignment, cell_assignment_path)
+```
+
+```{r}
+aucell_df <- getAUC(aucell_all) %>% 
+  t() %>% 
+  as_tibble(rownames = "cell")
+aucell_path <- file.path(results_dir, "adata_aucell_scores_df.rds")
+if (!file.exists(aucell_path)) saveRDS(aucell_df, aucell_path)
+```
+
+# Compare with UCell
+
+```{r}
+ucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_ucell_scores_df.rds"))
+```
+
+```{r}
+aucell_tidy <- aucell_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "name", 
+               values_to = "AUCell_score")
+```
+
+```{r}
+ucell_tidy <- ucell_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "name", 
+               values_to = "UCell_score") %>% 
+  mutate(name = str_remove(name, "_UCell")) 
+aucell_joined_df <- ucell_tidy %>% 
+  left_join(aucell_tidy, by = c("cell", "name"))
+```
+
+```{r, fig.width = 12, fig.asp = 1}
+aucell_joined_df %>% 
+  ggplot() + 
+  aes(UCell_score, AUCell_score) + 
+  geom_scattermore() + 
+  stat_cor() + 
+  facet_wrap(~name)
+```
+
+# AUCell hypoxia signature scoring
+
+```{r}
+aucell_hypoxia <- run_or_readRDS(
+  file.path(file_cache_dir, "aucell_hypoxia_scores.rds"), 
+  function() {
+    stromal_score <-
+      AUCell_run(so_stromal@assays$SCT@data,
+                 geneSets = c(hypoxia_gs_vec))
+    tumor_scores <-
+      AUCell_run(so_tumor@assays$SCT@data,
+                 geneSets = c(hypoxia_gs_vec))
+    immune_scores <- 
+      AUCell_run(so_imm@assays$SCT@data,
+                 geneSets = c(hypoxia_gs_vec))
+    aucell_all <- cbind(stromal_score, tumor_scores, immune_scores)
+  }
+)
+```
+
+```{r}
+aucell_hypoxia_df <- getAUC(aucell_hypoxia) %>% 
+  t() %>% 
+  as_tibble(rownames = "cell")
+aucell_hypoxia_path <- file.path(results_dir, "adata_aucell_hypoxia_scores_df.rds")
+if (!file.exists(aucell_hypoxia_path)) saveRDS(aucell_hypoxia_df, aucell_hypoxia_path)
+```
+

@@ -1,0 +1,42 @@
+---
+title: "Clinical features of single-cell RNAseq cohort"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+file_cache_dir <- file.path(cache_dir, "sc-clin-features")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+sample_metadata <- read_csv(here("data", "scRNAseq", "scRNAseq_full_metadata.csv"))
+```
+
+In total, there are 79 samples in this cohort. 
+
+```{r}
+nrow(sample_metadata)
+```
+
+Of these, there are 31 samples which are pretreatment. 
+
+```{r}
+sample_metadata_pre <- sample_metadata %>% 
+  filter(state == "PRE")
+nrow(sample_metadata_pre)
+```
+
+```{r, eval = F}
+sample_metadata_pre %>% write_csv(here("data", "scRNAseq", "scRNAseq_pre_metadata.csv"))
+```
+
+
+
+

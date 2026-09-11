@@ -1,0 +1,120 @@
+---
+title: "Expression of hypoxia related markers"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+library(Seurat)
+library(Matrix)
+library(Matrix.utils)
+library(DESeq2)
+
+file_cache_dir <- file.path(cache_dir, "sc-analysis-hypoxia-markers")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+## data frames
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(aucell_df, by = c("cell_label" = "cell")) %>% 
+  left_join(mean_hypoxia_df)
+```
+
+## Seurat objects 
+
+```{r}
+so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds"))
+so_tumor <- readRDS(file.path(cache_dir, "sc-processing-sctransform-tumor", "so_tumor.rds"))
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+```
+
+Add metadata to so. 
+
+```{r}
+so_stromal <- AddMetaData(so_stromal, metadata = so_stromal@meta.data %>%
+                            as_tibble(rownames = "cell") %>%
+                            left_join(mean_hypoxia_df, by = "sample_ID") %>%
+                            select(cell, hypoxia_hi.v.lo, mean_hypoxia, immune_hi.v.lo) %>% 
+                            column_to_rownames("cell"))
+so_tumor <- AddMetaData(
+  so_tumor,
+  metadata = so_tumor@meta.data %>%
+    as_tibble(rownames = "cell") %>%
+    left_join(mean_hypoxia_df, by = "sample_ID") %>%
+    select(cell, hypoxia_hi.v.lo, mean_hypoxia) %>%
+    column_to_rownames("cell")
+)
+so_imm <- AddMetaData(
+  so_imm,
+  metadata = so_imm@meta.data %>%
+    as_tibble(rownames = "cell") %>%
+    left_join(mean_hypoxia_df, by = "sample_ID") %>%
+    select(cell, hypoxia_hi.v.lo, mean_hypoxia, immune_hi.v.lo) %>%
+    column_to_rownames("cell"
+    )
+)
+```
+
+```{r}
+metadata_df <- bind_rows(
+  so_stromal@meta.data, 
+  so_imm@meta.data, 
+  so_tumor@meta.data
+) %>% 
+  as_tibble(rownames = "cell")
+```
+
+
+# Expression of HIF1A, EPAS1, VEGFA
+
+```{r}
+get_gene_expr_from_all_so <- function(genes) {
+  bind_rows(get_gene_expr_from_so(so_stromal, gene_vec = genes),
+            get_gene_expr_from_so(so_imm, gene_vec = genes),
+            get_gene_expr_from_so(so_tumor, gene_vec = genes))
+}
+```
+
+```{r}
+gene_df <- get_gene_expr_from_all_so(c("HIF1A", "EPAS1", "VEGFA"))
+```
+
+```{r}
+plot_df <- metadata_df %>% 
+  left_join(gene_df, by = "cell")
+plot_df %>% 
+  ggplot() + 
+  aes(compartment, HIF1A) + 
+  geom_violin(scale = "width", draw_quantiles = 0.5) + 
+  facet_grid(hypoxia_hi.v.lo~immune_hi.v.lo)
+plot_df %>% 
+  ggplot() + 
+  aes(compartment, EPAS1) + 
+  geom_violin(scale = "width", draw_quantiles = 0.5) + 
+  facet_grid(hypoxia_hi.v.lo~immune_hi.v.lo)
+plot_df %>% 
+  ggplot() + 
+  aes(compartment, VEGFA) + 
+  geom_violin(scale = "width", draw_quantiles = 0.5) + 
+  facet_grid(hypoxia_hi.v.lo~immune_hi.v.lo)
+```
+
+The important thing to note here is that HIF1A and VEGFA are BOTH also high in immune cells; EPAS1, relatively, isn't. 
+
+
+
+

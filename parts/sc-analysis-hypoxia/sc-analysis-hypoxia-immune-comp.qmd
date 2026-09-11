@@ -1,0 +1,121 @@
+---
+title: "Effect of hypoxia on immune composition"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+file_cache_dir <- file.path(cache_dir, "sc-analysis-hypoxia-immune-comp")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+ucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_ucell_scores_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(ucell_df, by = c("cell_label" = "cell"))%>% 
+  left_join(aucell_df, by = c("cell_label" = "cell"))
+
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+immune_prop_df <- read_tsv(file.path(results_dir, "sc_immune_prop_df.tsv")) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c(
+    "immune low", "immune mid", "immune high"
+  )))
+```
+
+Below code comes from `sc-processing-immune`. 
+
+```{r, fig.asp = 0.5}
+palette_specific_names <- obs_df %>% 
+  filter(compartment == "Immune") %>% 
+  drop_na(specific_cell_type) %>% 
+  filter(specific_cell_type != "Doublets") %>% 
+  filter(specific_cell_type != "Stressed") %>% 
+  .$specific_cell_type %>% 
+  unique() %>% 
+  sort()
+palette_specific <- set_names(
+  social_palette[1:length(palette_specific_names)], 
+  palette_specific_names
+)
+
+prop_df <- obs_df %>% 
+  filter(compartment == "Immune") %>% 
+  drop_na(specific_cell_type) %>% 
+  filter(specific_cell_type != "Doublets") %>% 
+  filter(specific_cell_type != "Stressed") %>% 
+  filter(specific_cell_type != "Contaminating") %>% 
+  Rsc::calculate_proportion(sample_ID, specific_cell_type) %>% 
+  arrange(specific_cell_type) 
+
+prop_df %>% 
+  left_join(select(immune_prop_df, sample_ID, immune_hi.v.lo), 
+            by = c("sample_ID")) %>% 
+  Rsc::plot_prop(specific_cell_type, factor(sample_ID)) + 
+  scale_fill_manual(values = palette_specific) +
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  labs(x = "Sample", y = "Frequency")  + 
+  facet_grid(~immune_hi.v.lo, scale = "free_x")
+```
+
+```{r}
+
+prop_ann_df <- prop_df %>% 
+  left_join(immune_prop_df %>% 
+              mutate(immune_prop = prop) %>% 
+              select(sample_ID, immune_hi.v.lo, immune_prop), 
+            by = c("sample_ID")) %>% 
+  left_join(select(mean_hypoxia_df, sample_ID, mean_hypoxia), 
+            by = c("sample_ID"))
+```
+
+```{r}
+model_out_df <- prop_ann_df %>%
+  group_by(specific_cell_type) %>%
+  summarise(lm_out = broom::tidy(lm(prop ~ mean_hypoxia + immune_prop)),
+            AIC = stats::extractAIC(lm(prop ~ mean_hypoxia + immune_prop))[2]) %>% 
+  unnest(lm_out)
+
+model_int_df <- prop_ann_df %>%
+  group_by(specific_cell_type) %>%
+  summarise(lm_int_out = broom::tidy(lm(prop ~ mean_hypoxia * immune_prop)),
+            AIC = stats::extractAIC(lm(prop ~ mean_hypoxia * immune_prop))[2]) %>% 
+  unnest(lm_int_out)
+```
+
+```{r}
+model_joined_df <- model_int_df %>% 
+  left_join(model_out_df, by = c("specific_cell_type", "term"), 
+            suffix = c(".interaction", ""))
+
+model_joined_df %>% 
+  filter(term == "(Intercept)") %>% # just grabbing one row 
+  mutate(AIC_diff = AIC.interaction - AIC) %>% 
+  arrange(desc(AIC_diff))
+```
+
+```{r}
+model_out_df %>% 
+  filter(term == "mean_hypoxia") %>% 
+  ggplot() + 
+  aes(fct_reorder(specific_cell_type, estimate), estimate) + 
+  geom_col() + 
+  geom_text(aes(label = format(p.value, scientific = FALSE, digits = 2)), 
+            angle = 90, 
+            hjust = 0) + 
+  rotate_x_text() + 
+  remove_x_spine() + 
+  labs(y = "hypoxia effect estimate")
+```
+
+
+

@@ -1,0 +1,426 @@
+---
+title: "Bulk RNA-seq Clinical Features"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+# Purpose
+
+The purpose of this chapter is to lay out some of the clinical characteristics in the bulk cohort that we're analyzing. 
+
+# Set up
+
+We'll start by reading in the clinical metadata table.  
+
+```{r}
+bulk_clin_metadata <- read_tsv(here("data", "bulk", "bulk-clin-metadata.tsv"))
+```
+
+## Data Cleaning
+
+```{r}
+bulk_clin_metadata <- bulk_clin_metadata %>% 
+  mutate(age = as.numeric(age))
+```
+
+
+# Characteristics
+
+Our bulk cohort is made up of 8 previously published cohorts:
+
+```{r}
+bulk_clin_metadata$cohort %>% unique()
+```
+
+In our metadata table, we've collected the following features:  
+
+```{r}
+colnames(bulk_clin_metadata)
+```
+
+In total, there are 693 patients in our aggregated dataset. 
+
+```{r}
+nrow(bulk_clin_metadata)
+```
+
+## Age
+
+```{r}
+p <- bulk_clin_metadata %>%
+  ggplot() +
+  aes(age) +
+  geom_histogram(bins = 10) +
+  remove_x_spine() + 
+  scale_y_continuous(expand = c(0, 0)) 
+p + 
+  geom_segment(aes(x = median(age), xend = median(age), y = 0, yend = Inf), 
+               linetype = "dashed") + 
+  geom_text(aes(x = median(age), y = 60, label = paste0("median=", median(age))), 
+            hjust = 1.1) + 
+  labs(y = "Freq. ")
+```
+
+```{r}
+median_age_df <-
+  bulk_clin_metadata %>% 
+  group_by(group) %>% 
+  summarise(median_age = median(age))
+p +
+  facet_grid(group ~ .) +
+  geom_segment(
+    aes(
+      x = median_age,
+      xend = median_age,
+      y = 0,
+      yend = Inf
+    ),
+    linetype = "dashed",
+    data = median_age_df
+  ) +
+  geom_text(
+    aes(
+      x = median_age,
+      y = 60,
+      label = paste0("median=", median_age)
+    ),
+    hjust = 1.1,
+    data = median_age_df
+  ) 
+```
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+
+median_age_df <-
+  bulk_clin_metadata %>% 
+  group_by(cohort) %>% 
+  summarise(median_age = median(age))
+p +
+  facet_grid(cohort ~ .) +
+  geom_segment(
+    aes(
+      x = median_age,
+      xend = median_age,
+      y = 0,
+      yend = Inf
+    ),
+    linetype = "dashed",
+    data = median_age_df
+  ) +
+  geom_text(
+    aes(
+      x = median_age,
+      y = 30,
+      label = paste0("median=", median_age)
+    ),
+    hjust = 1.1,
+    data = median_age_df
+  ) + 
+  theme(strip.text.y = element_text(angle = 0))
+```
+
+## Sex
+
+```{r, fig.width = 3, fig.asp = 1}
+#| fig-width: 3
+#| fig-asp: 1
+
+count_df <- bulk_clin_metadata %>% 
+  group_by(sex) %>% 
+  count() %>% 
+  ungroup() %>%
+  mutate(pct = n / sum(n))
+count_df %>% 
+  ggplot() + 
+  aes(1, n) + 
+  geom_col(aes(fill = sex)) + 
+  annotate("text", x = 1, y = count_df$n[[2]], vjust = 1.3, 
+           label = paste0(format(count_df$pct[[2]]*100, digits = 3), "%")) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  scale_fill_manual(values = palette_sex) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+```{r, fig.width = 3, fig.asp = 1}
+#| fig-width: 3
+#| fig-asp: 1
+
+count_df <- bulk_clin_metadata %>% 
+  group_by(sex, group) %>% 
+  count() %>% 
+  group_by(group) %>% 
+  arrange(desc(sex)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_pct = cumsum(pct)) %>% 
+  ungroup()
+count_df %>% 
+  ggplot() + 
+  aes(1, pct) + 
+  geom_col(aes(fill = sex)) + 
+  geom_text(aes(y = cumsum_pct, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  facet_grid(~group) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  scale_fill_manual(values = palette_sex) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+## Tumor type
+
+```{r, fig.width = 3, fig.height = 3}
+#| fig-width: 3
+#| fig-height: 3
+
+count_df <- bulk_clin_metadata %>% 
+  mutate(tumor_type = case_when(
+    is.na(tumor_type) | tumor_type %in% c("cutaneous and eye", "muco-cutaneous") ~ "unknown/other", 
+    TRUE ~ tumor_type
+  )) %>% 
+  group_by(tumor_type) %>% 
+  count() %>%
+  ungroup() %>% 
+  arrange(desc(tumor_type)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_n = cumsum(n))
+count_df %>% 
+  ggplot() + 
+  aes(1, n) + 
+  geom_col(aes(fill = tumor_type)) + 
+  geom_text(aes(y = cumsum_n, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+
+```{r, fig.width = 4, fig.height = 3}
+#| fig-width: 4
+#| fig-height: 3
+
+count_df <- bulk_clin_metadata %>% 
+  mutate(tumor_type = case_when(
+    is.na(tumor_type) | tumor_type %in% c("cutaneous and eye", "muco-cutaneous") ~ "unknown/other", 
+    TRUE ~ tumor_type
+  )) %>% 
+  group_by(tumor_type, group) %>% 
+  count() %>%
+  group_by(group) %>% 
+  arrange(desc(tumor_type)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_pct = cumsum(pct)) %>% 
+  ungroup()
+count_df %>% 
+  ggplot() + 
+  aes(1, pct) + 
+  geom_col(aes(fill = tumor_type)) + 
+  geom_text(aes(y = cumsum_pct, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  facet_grid(~group) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+## prior IO
+
+## prior therapy
+
+## treatment
+
+```{r, fig.width = 4, fig.height = 3}
+#| fig-width: 4
+#| fig-height: 3
+
+count_df <- bulk_clin_metadata %>% 
+  group_by(treatment) %>% 
+  count() %>%
+  ungroup() %>% 
+  arrange(desc(treatment)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_n = cumsum(n))
+count_df %>% 
+  ggplot() + 
+  aes(1, n) + 
+  geom_col(aes(fill = treatment)) + 
+  geom_text(aes(y = cumsum_n, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+```{r, fig.width = 4, fig.height = 3}
+#| fig-width: 4
+#| fig-height: 3
+
+count_df <- bulk_clin_metadata %>% 
+  group_by(treatment, group) %>% 
+  count() %>%
+  group_by(group) %>% 
+  arrange(desc(treatment)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_pct = cumsum(pct)) %>% 
+  ungroup()
+count_df %>% 
+  ggplot() + 
+  aes(1, pct) + 
+  geom_col(aes(fill = treatment)) + 
+  geom_text(aes(y = cumsum_pct, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  facet_grid(~group) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+## response
+
+```{r, fig.width = 3, fig.height = 3}
+#| fig-width: 3
+#| fig-height: 3
+
+count_df <- bulk_clin_metadata %>% 
+  mutate(response_splitSD = ifelse(is.na(response_splitSD), "NA", response_splitSD)) %>% 
+  group_by(response_splitSD) %>% 
+  count() %>%
+  ungroup() %>% 
+  arrange(desc(response_splitSD)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_n = cumsum(n))
+count_df %>% 
+  ggplot() + 
+  aes(1, n) + 
+  geom_col(aes(fill = response_splitSD)) + 
+  geom_text(aes(y = cumsum_n, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  scale_fill_manual(values = palette_response) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+```{r, fig.width = 4, fig.height = 3}
+#| fig-width: 4
+#| fig-height: 3
+
+count_df <- bulk_clin_metadata %>% 
+  mutate(response_splitSD = ifelse(is.na(response_splitSD), "NA", response_splitSD)) %>% 
+  group_by(response_splitSD, group) %>% 
+  count() %>%
+  group_by(group) %>% 
+  arrange(desc(response_splitSD)) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  mutate(cumsum_pct = cumsum(pct)) %>% 
+  ungroup()
+count_df %>% 
+  ggplot() + 
+  aes(1, pct) + 
+  geom_col(aes(fill = response_splitSD)) + 
+  geom_text(aes(y = cumsum_pct, 
+                label = paste0(format(pct*100, digits = 3), "%")), 
+            vjust = 1, 
+            size = 10*GGPLOT_TEXT_SCALE_FACTOR) + 
+  scale_fill_manual(values = palette_response) + 
+  facet_grid(~group) + 
+  scale_y_continuous(expand = c(0, 0)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank()) + 
+  labs(y = "Freq. ")
+```
+
+# Response and Progression
+
+## Discovery cohort
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(group == "discovery") %>% 
+  drop_na(response_splitSD) %>% 
+  filter(is.na(excluded_clin)) %>% 
+  mutate(progressed = case_when(
+    is.na(censor_pfs_event_1_progressed_0) ~ "unknown",
+    censor_pfs_event_1_progressed_0 == 0 ~ "progressed", 
+    censor_pfs_event_1_progressed_0 == 1 ~ "did not progress", 
+    TRUE ~ NA_character_
+  )) %>% 
+  mutate(response = ifelse(is.na(response), "SD", response)) %>% 
+  group_by(treatment, response, progressed) %>% 
+  count() %>% 
+  pivot_wider(id_cols = c(treatment, response), 
+              names_from = progressed, 
+              values_from = n, 
+              values_fill = 0) %>% 
+  mutate(progressed_vs_not = progressed / (`did not progress` + progressed)) %>% 
+  relocate(progressed_vs_not, .before = `did not progress`)
+```
+
+```{r}
+
+count_treatment_imm_progressed_df <- bulk_clin_metadata %>% 
+  filter(group == "discovery") %>% 
+  filter(is.na(excluded_clin)) %>% 
+  mutate(progressed = case_when(
+    is.na(censor_pfs_event_1_progressed_0) ~ "unknown",
+    censor_pfs_event_1_progressed_0 == 0 ~ "progressed", 
+    censor_pfs_event_1_progressed_0 == 1 ~ "did not progress", 
+    TRUE ~ NA_character_
+  )) %>% 
+  group_by(treatment, progressed, immune_hi.v.lo) %>% 
+  count() 
+count_treatment_imm_progressed_df %>% 
+  pivot_wider(id_cols = c(treatment, immune_hi.v.lo), 
+              names_from = progressed, 
+              values_from = n, 
+              values_fill = 0) %>% 
+  mutate(progressed_vs_not = progressed / (`did not progress` + progressed)) %>% 
+  relocate(progressed_vs_not, .before = `did not progress`)
+
+count_treatment_imm_progressed_df %>% 
+  pivot_wider(id_cols = c(treatment, progressed), 
+              names_from = immune_hi.v.lo, 
+              values_from = n, 
+              values_fill = 0) %>% 
+  mutate(immune_high_vs_not = `immune high` / (`immune high` + `immune low`)) %>% 
+  relocate(immune_high_vs_not, .before = `immune high`)
+```
+
+

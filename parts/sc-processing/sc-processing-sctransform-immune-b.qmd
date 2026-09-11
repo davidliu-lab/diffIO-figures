@@ -1,0 +1,226 @@
+---
+title: "SCTransform B cells"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-sctransform-immune-b")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+so <- subset(so_imm %>% set_idents("general_cluster_immune"), idents = "B cell")
+```
+
+# SCTransform
+
+```{r}
+so <- run_or_readRDS(
+  file.path(file_cache_dir, "so_immune_b.rds"), 
+  function() {
+    run_seurat_rna_workflow(
+      so,
+      run_SCT = TRUE,
+      resolutions = seq(0.1, 1, 0.1),
+      dims = 1:30
+    ) 
+  }
+)
+```
+
+
+```{r}
+metadata_df <- get_metadata_from_so(so)
+```
+
+## Clustering Analysis
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+
+metadata_df %>%
+  dplyr::select(-SCT_snn_res.1) %>%
+  pivot_longer(cols = str_subset(colnames(.), "SCT_snn_res")) %>%
+  plot_umap(color_str = "value", pointsize = 2.1) +
+  geom_text_repel(
+    aes(label = value),
+    data = ~ ..1 %>%
+      group_by(name, value) %>%
+      summarise(UMAP_1 = mean(UMAP_1), UMAP_2 = mean(UMAP_2))
+  ) +
+  facet_wrap( ~ name) +
+  theme(legend.position = "none")
+```
+
+```{r}
+metadata_df %>% 
+  plot_umap(color_str = "sample_ID", pointsize = 2.1)
+```
+
+# SCTransform, Integrated
+
+
+```{r}
+so_integrated <- run_or_readRDS(
+  file.path(file_cache_dir, "so_immune_b_integrated.rds"), 
+  function() {
+    so_list <-
+      subset(so_imm %>% set_idents("general_cluster_immune"),
+             idents = c("B cell")) %>%
+      SplitObject(split.by = "patient.clin")
+    
+    for (name in names(so_list)) {
+      if (ncol(so_list[[name]]) < 100) {
+        so_list[[name]] <- NULL
+      }
+    }
+    
+    so_list <- so_list %>%
+      map(SCTransform)
+    
+    features <- SelectIntegrationFeatures(object.list = so_list,
+                                          nfeatures = 3000)
+    so_list <-
+      PrepSCTIntegration(object.list = so_list,
+                         anchor.features = features)
+    immune.anchors <-
+      FindIntegrationAnchors(
+        object.list = so_list,
+        dims = 1:15,
+        normalization.method = "SCT",
+        anchor.features = features
+      )
+    so_integrated <- IntegrateData(
+      anchorset = immune.anchors,
+      normalization.method = "SCT",
+      k.weight = 50
+    )
+    so_integrated <-
+      run_seurat_rna_workflow(
+        so_integrated,
+        set_percentages = FALSE,
+        run_normalize = FALSE,
+        run_SCT = FALSE,
+        dims = 1:30
+      )
+    so_integrated <- PrepSCTFindMarkers(so_integrated)
+    return(so_integrated)
+  }
+)
+
+```
+
+```{r}
+metadata_df <- so_integrated %>% 
+  get_metadata_from_so()
+```
+
+
+## Clustering Analysis
+
+```{r, fig.asp = 0.33}
+#| fig-asp: 0.33
+
+metadata_df %>%
+  pivot_longer(cols = str_subset(colnames(.), "integrated_snn_res")) %>%
+  plot_umap(color_str = "value", pointsize = 2.1) +
+  geom_text_repel(
+    aes(label = value),
+    data = ~ ..1 %>%
+      group_by(name, value) %>%
+      summarise(UMAP_1 = mean(UMAP_1), UMAP_2 = mean(UMAP_2))
+  ) +
+  facet_wrap( ~ name) +
+  theme(legend.position = "none")
+```
+
+```{r}
+metadata_df %>% 
+  plot_umap(color_str = "sample_ID", pointsize = 2.1)
+```
+
+### Markers res 0.5
+
+```{r}
+markers_res0.5 <- run_or_readRDS(
+  file.path(file_cache_dir, "dge_one.v.all_res0.5.rds"), 
+  function() {
+    FindAllMarkers(so_integrated %>% set_assay("SCT") %>% set_idents("integrated_snn_res.0.5"), 
+                   assay = "SCT")
+  } 
+)
+markers_res0.5_df <- markers_res0.5 %>% 
+  as_tibble()
+```
+
+```{r}
+markers_res0.5_wide <- markers_res0.5_df %>% 
+  filter(p_val_adj < 0.05) %>% 
+  filter(avg_log2FC > 0) %>% 
+  group_by(cluster) %>% 
+  arrange(desc(avg_log2FC)) %>% 
+  mutate(rank = row_number()) %>% 
+  pivot_wider(id_cols = rank, 
+              names_from = cluster, 
+              values_from = gene) %>% 
+  {.[, c("rank", sort(as.character(colnames(.)[-1])))]}
+datatable(markers_res0.5_wide)
+```
+
+
+```{r}
+res0.5_key <- c(
+  "0: Stressed", 
+  "1: B cells", 
+  "2: Proliferating", 
+  "3: Plasma cells", 
+  "4: Stressed", 
+  "5: B/T doublets", 
+  "6: Mito high", 
+  "7: B cells", 
+  "8: B cells"
+) %>% 
+  set_names(0:8)
+
+metadata_to_add <- 
+  get_metadata_from_so(so_integrated, metadata = "integrated_snn_res.0.5", reduction = NULL) %>% 
+  mutate(clusters_B = res0.5_key[as.character(integrated_snn_res.0.5)]) %>% 
+  mutate(general_clusters_B = case_when(
+    clusters_B %>% str_detect("B cells") ~ "B cells", 
+    clusters_B %>% str_detect("Plasma") ~ "Plasma", 
+    clusters_B %>% str_detect("Proliferating") ~ "Proliferating", 
+    clusters_B %>% str_detect("doublets") ~ "Doublets", 
+    TRUE ~ "Stressed"
+  )) %>% 
+  select(-integrated_snn_res.0.5) %>% 
+  column_to_rownames("cell")
+so_integrated <- AddMetaData(so_integrated, metadata = metadata_to_add)
+```
+
+```{r}
+get_metadata_from_so(so_integrated) %>% 
+  plot_umap(color_str = "clusters_B", label = T, pointsize = 3.1)
+get_metadata_from_so(so_integrated) %>% 
+  plot_umap(color_str = "general_clusters_B", label = T, pointsize = 3.1)
+```
+
+
+# Save
+
+```{r}
+saveRDS(so_integrated, file.path(file_cache_dir, "so_immune_b_integrated.rds"))
+```
+
+

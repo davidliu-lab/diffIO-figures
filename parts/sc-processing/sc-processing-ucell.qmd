@@ -1,0 +1,196 @@
+---
+title: "UCell signature scoring"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+library(UCell)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-ucell")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+## Seurat objects 
+
+```{r}
+so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds"))
+so_tumor <- readRDS(file.path(cache_dir, "sc-processing-sctransform-tumor", "so_tumor.rds"))
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+```
+
+## Read in signature scores
+
+### Bagaev signatures
+
+```{r}
+signature_df <- read_excel(
+  file.path(data_dir, "signatures", "1-s2.0-S1535610821002221-mmc2.xlsx"), 
+  sheet = "Gene Description", 
+  skip = 1
+) %>% mutate(Gene = str_replace(Gene, "-", "."))
+
+signature_list <- signature_df %>% 
+  named_group_split(`Gene signature`) %>% 
+  map(~str_replace(.$Gene, "\\.", "-")) 
+```
+
+### Select Hallmarks signatures
+
+```{r}
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+select_gs <- c(
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE", 
+  "HALLMARK_INTERFERON_ALHPA_RESPONSE", 
+  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", 
+  "HALLMARK_ANGIOGENESIS", 
+  "HALLMARK_HYPOXIA"
+)
+select_gs_vec <- gs_vec[select_gs]
+```
+
+# UCell signature scoring
+
+## Stromal
+
+```{r}
+ucell_stromal <- run_or_readRDS(
+  file.path(file_cache_dir, "ucell_stromal_scores.rds"), 
+  function() {
+    ScoreSignatures_UCell(so_stromal@assays$SCT@data,
+                          features = c(signature_list, select_gs_vec))
+  }
+)
+```
+
+Warning: The following genes were not found and will be imputed to exp=0:
+* IFNA2,IFNB1,IL21,FCRL5,TNFRSF13B,CX3CR1,IL12B,CD244,KLRK1,NCR1,FCGR3B,MPO,PGLYRP1,IL22,IL13,IL4,IL5,CCR8,CCL1,MARCHF1,WARS1,CCN1,CCN2,BRS3,CCN5,LALBA
+
+## Tumor
+
+```{r}
+ucell_tumor <- run_or_readRDS(
+  file.path(file_cache_dir, "ucell_tumor_scores.rds"), 
+  function() {
+    ScoreSignatures_UCell(so_tumor@assays$SCT@data,
+                          features = c(signature_list, select_gs_vec))
+  }
+)
+```
+
+Warning: The following genes were not found and will be imputed to exp=0:
+* IFNA2,IL21,CCR3,IL12B,XCR1,CCR8,CCL1,MARCHF1,WARS1,CCN1,CCN2,PRSS2,B4GALNT2,BRS3,CCN5
+
+## Immune
+
+```{r}
+ucell_imm <- run_or_readRDS(
+  file.path(file_cache_dir, "ucell_imm_scores.rds"), 
+  function() {
+    ScoreSignatures_UCell(so_imm@assays$SCT@data,
+                          features = c(signature_list, select_gs_vec))
+  }
+)
+```
+
+Warning: The following genes were not found and will be imputed to exp=0:
+* IFNA2,NOS2,CA9,IL5,MARCHF1,WARS1,BDNF,CCN1,CCN2,FOXC2,SGCG,B4GALNT2,BRS3,CCN5,EDN2,IGFBP1,INHA,LALBA,NCAN
+
+## Aggregate
+
+```{r}
+ucell_scores_df <- bind_rows(
+  ucell_imm %>% as_tibble(rownames = "cell"), 
+  ucell_tumor %>% as_tibble(rownames = "cell"), 
+  ucell_stromal %>% as_tibble(rownames = "cell")
+)
+ucell_path <- file.path(results_dir, "adata_ucell_scores_df.rds")
+if (!file.exists(ucell_path)) saveRDS(ucell_scores_df, ucell_path)
+```
+
+# Additional signatures
+
+## Benci et al. 
+
+```{r}
+ifng_gs <- read_csv(file.path(data_dir, "signatures", "ifng_gs.csv"))$IFNG.GS
+isg_rs <- read_csv(file.path(data_dir, "signatures", "isg_rs.csv"))$ISG.RS
+
+benci_list <- list(
+  ISG.RS = isg_rs, 
+  IFNG.GS = ifng_gs
+)
+
+```
+
+## Stromal
+
+```{r}
+ucell_stromal_benci <- run_or_readRDS(
+  file.path(file_cache_dir, "ucell_stromal_benci.rds"), 
+  function() {
+    ScoreSignatures_UCell(so_stromal@assays$SCT@data,
+                          features = c(benci_list))
+  }
+)
+```
+
+Warning: The following genes were not found and will be
+                        imputed to exp=0:
+* FTSJD2,KLRK1,PRIC285,MARCHF1,WARS1,CCN1,CCN2,PGLYRP1,BRS3,CCN5,LALBA
+
+## Tumor
+
+```{r}
+ucell_tumor_benci <- run_or_readRDS(
+  file.path(file_cache_dir, "ucell_tumor_benci.rds"), 
+  function() {
+    ScoreSignatures_UCell(so_tumor@assays$SCT@data,
+                          features = c(benci_list))
+  }
+)
+```
+
+Warning: The following genes were not found and will be
+                        imputed to exp=0:
+* FTSJD2,PRIC285,MARCHF1,WARS1,CCN1,CCN2,PRSS2,B4GALNT2,BRS3,CCN5
+
+## Immune
+
+```{r}
+ucell_imm_benci <- run_or_readRDS(
+  file.path(file_cache_dir, "ucell_imm_benci.rds"), 
+  function() {
+    ScoreSignatures_UCell(so_imm@assays$SCT@data,
+                          features = c(benci_list))
+  }
+)
+```
+
+Warning: The following genes were not found and will be
+                        imputed to exp=0:
+* FTSJD2,PRIC285,MARCHF1,WARS1,BDNF,CCN1,CCN2,FOXC2,SGCG,B4GALNT2,BRS3,CCN5,EDN2,IGFBP1,INHA,LALBA,NCAN
+
+## Aggregate
+
+```{r}
+ucell_benci_df <- bind_rows(
+  ucell_imm_benci %>% as_tibble(rownames = "cell"), 
+  ucell_tumor_benci %>% as_tibble(rownames = "cell"), 
+  ucell_stromal_benci %>% as_tibble(rownames = "cell")
+)
+ucell_benci_path <- file.path(results_dir, "adata_ucell_benci_df.rds")
+if (!file.exists(ucell_benci_path)) saveRDS(ucell_benci_df, ucell_benci_path)
+```
+

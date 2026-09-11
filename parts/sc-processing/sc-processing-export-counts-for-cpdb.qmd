@@ -1,0 +1,290 @@
+---
+title: "Export counts for cpdb"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+  eval: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+library(Seurat)
+library(Matrix)
+file_cache_dir <- file.path(cache_dir, "sc-processing-export-counts-for-cpdb")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+## data frames
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(aucell_df, by = c("cell_label" = "cell")) %>% 
+  left_join(mean_hypoxia_df)
+```
+
+## Seurat objects 
+
+Filter Seurat objects to only include cells with nFeature_RNA > 1000. 
+
+```{r}
+so_tumor <- readRDS(file.path(cache_dir, "sc-processing-sctransform-tumor", "so_tumor.rds"))
+so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds")) %>% 
+  subset(subset = nFeature_RNA > 1000)
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds")) %>% 
+  subset(subset = nFeature_RNA > 1000)
+```
+
+## Export
+
+```{r}
+outdir <- file.path(results_dir, "cpdb", "cpdb_10x_dir")
+if (!dir.exists(outdir)) dir.create(outdir)
+```
+
+```{r, eval=FALSE}
+for (s in unique(so_tumor$sample_ID)){
+  suboutdir <- file.path(results_dir, "cpdb", sprintf("cpdb_%s", s))
+  if (!dir.exists(suboutdir)) dir.create(suboutdir)
+  if (!dir.exists(file.path(suboutdir, "10x_out"))) dir.create(file.path(suboutdir, "10x_out"))
+  print(suboutdir)
+  
+  so_tumor_subset <- so_tumor[,so_tumor@meta.data$sample_ID == s]
+  so_stromal_subset <- so_stromal[,so_stromal@meta.data$sample_ID == s]
+  so_imm_subset <- so_imm[,so_imm@meta.data$sample_ID == s]
+  
+  mtx <- cbind(
+    so_tumor_subset@assays$RNA@counts, 
+    so_stromal_subset@assays$RNA@counts, 
+    so_imm_subset@assays$RNA@counts
+  )
+  writeMM(obj = mtx, file = file.path(suboutdir, '10x_out', 'matrix.mtx'))
+  
+  barcodes <- as.data.frame(
+    list(barcodes = c(colnames(so_tumor_subset@assays$RNA@counts), 
+                      colnames(so_stromal_subset@assays$RNA@counts), 
+                      colnames(so_imm_subset@assays$RNA@counts)))
+  )
+  
+  write.table(barcodes, file = file.path(suboutdir, '10x_out', 'barcodes.tsv'), sep = '\t', quote=F, row.names = F, col.names = F)
+  
+  features <- as.data.frame(list(
+    gene_ids = rownames(so_tumor@assays$RNA@counts),
+    gene_names = rownames(so_tumor@assays$RNA@counts),
+    feature_types = "Gene Expression"
+  ))
+  write.table(
+    features,
+    file = file.path(suboutdir, '10x_out', 'features.tsv'),
+    sep = '\t',
+    quote = F,
+    row.names = F,
+    col.names = F
+  ) 
+  
+  metadata <- bind_rows(
+    so_tumor_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+    
+    so_stromal_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+    
+    so_imm_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment)
+  )
+  write.table(
+    metadata,
+    file = file.path(suboutdir, 'metadata.tsv'),
+    sep = '\t',
+    quote = F,
+    row.names = F,
+    col.names = T
+  )
+  
+}
+```
+
+```{r, eval = FALSE}
+
+for (s in unique(so_tumor$sample_ID)){
+  suboutdir <- file.path(results_dir, "cpdb", sprintf("cpdb_%s", s))
+  if (!dir.exists(suboutdir)) dir.create(suboutdir)
+  if (!dir.exists(file.path(suboutdir, "10x_out"))) dir.create(file.path(suboutdir, "10x_out"))
+  print(suboutdir)
+  
+  so_tumor_subset <- so_tumor[,so_tumor@meta.data$sample_ID == s]
+  so_stromal_subset <- so_stromal[,so_stromal@meta.data$sample_ID == s]
+  so_imm_subset <- so_imm[,so_imm@meta.data$sample_ID == s]
+  
+  metadata <- bind_rows(
+    so_tumor_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+    
+    so_stromal_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+    
+    so_imm_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment)
+  )
+  write.table(
+    metadata,
+    file = file.path(suboutdir, 'compartment_metadata.tsv'),
+    sep = '\t',
+    quote = F,
+    row.names = F,
+    col.names = T
+  )
+  
+  
+  
+  metadata <- bind_rows(
+    so_tumor_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+    
+    so_stromal_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+    
+    so_imm_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, specific_cluster_immune) %>% 
+      filter(specific_cluster_immune %in% c("Mac/mono", "DC", "CD8+ T", "Naive-like T", "Tregs", "Mast cell", "NK", "B cells", "Plasma", "Neutrophil")) %>% 
+      dplyr::rename(compartment = specific_cluster_immune)
+  )
+  write.table(
+    metadata,
+    file = file.path(suboutdir, 'specific_metadata.tsv'),
+    sep = '\t',
+    quote = F,
+    row.names = F,
+    col.names = T
+  )
+  
+}
+```
+
+
+
+```{r, eval = FALSE}
+
+for (s in unique(so_tumor$sample_ID)){
+  suboutdir <- file.path(results_dir, "cpdb", sprintf("cpdb_%s", s))
+  if (!dir.exists(suboutdir)) dir.create(suboutdir)
+  if (!dir.exists(file.path(suboutdir, "10x_out"))) dir.create(file.path(suboutdir, "10x_out"))
+  print(suboutdir)
+  
+  so_tumor_subset <- so_tumor[,so_tumor@meta.data$sample_ID == s]
+  so_stromal_subset <- so_stromal[,so_stromal@meta.data$sample_ID == s]
+  so_imm_subset <- so_imm[,so_imm@meta.data$sample_ID == s]
+
+  metadata <- bind_rows(
+    so_tumor_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, compartment),
+
+    so_stromal_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, general_cluster_stromal) %>%
+      dplyr::rename(compartment = general_cluster_stromal),
+
+    so_imm_subset@meta.data %>%
+      as_tibble(rownames = "barcodes") %>%
+      select(barcodes, specific_cluster_immune) %>%
+      filter(specific_cluster_immune %in% c("Mac/mono", "DC", "CD8+ T", "Naive-like T", "Tregs", "Mast cell", "NK", "B cells", "Plasma", "Neutrophil")) %>%
+      dplyr::rename(compartment = specific_cluster_immune)
+  )
+  write.table(
+    metadata,
+    file = file.path(suboutdir, 'specific.imm.stromal_metadata.tsv'),
+    sep = '\t',
+    quote = F,
+    row.names = F,
+    col.names = T
+  )
+  
+}
+```
+
+Then, to run cellphone DB, run the following in the conda cellphone db environment for each sample:
+
+```{bash, eval = FALSE}
+cd results/cpdb
+conda activate cpdb_env
+
+cellphonedb method analysis \
+--counts-data hgnc_symbol \
+--project-name compartment \
+compartment_metadata.tsv \
+10x_out
+
+
+cellphonedb method statistical_analysis \
+--counts-data hgnc_symbol \
+--project-name cell_type_specific \
+specific_metadata.tsv \
+10x_ou
+
+cellphonedb method statistical_analysis \
+--counts-data hgnc_symbol \
+--project-name cell_type_specific_stromal_imm \
+specific.imm.stromal_metadata.tsv \
+10x_out
+```
+
+Or, if you'd like to run it in a loop: 
+
+```{bash, eval = FALSE}
+for f in *; do
+  if [ $f = 'metadata.tsv' ]; then 
+    echo 'skipping '$f
+  elif [ $f = 'cpdb_10x_dir' ]; then
+    echo 'skipping '$f
+  else
+    echo 'running '$f
+    cd $f
+    cellphonedb method statistical_analysis \
+      --counts-data hgnc_symbol \
+      --project-name cell_type_specific_stromal_imm \
+      specific.imm.stromal_metadata.tsv \
+      10x_out
+    cd -
+  fi
+done
+```
+
+For each sample, the output looks like this: 
+
+```
+running cpdb_<sample>
+[ ][CORE][12/12/23-02:57:23][INFO] Initializing SqlAlchemy CellPhoneDB Core
+[ ][CORE][12/12/23-02:57:23][INFO] Using custom database at ~/.cpdb/releases/v4.0.0/cellphone.db
+[ ][APP][12/12/23-02:57:23][INFO] Launching Method cpdb_statistical_analysis_local_method_launcher
+[ ][APP][12/12/23-02:57:23][INFO] Launching Method _set_paths
+[ ][APP][12/12/23-02:57:23][INFO] Launching Method _load_meta_counts
+[ ][APP][12/12/23-02:57:35][INFO] Launching Method _check_counts_data
+[ ][CORE][12/12/23-02:57:35][INFO] Launching Method cpdb_statistical_analysis_launcher
+[ ][CORE][12/12/23-02:57:35][INFO] Launching Method _counts_validations
+[ ][CORE][12/12/23-02:57:36][INFO] Launching Method get_interactions_genes_complex
+[ ][CORE][12/12/23-02:57:37][INFO] [Cluster Statistical Analysis] Threshold:0.1 Iterations:1000 Debug-seed:-1 Threads:4 Precision:3
+[ ][CORE][12/12/23-02:57:38][INFO] Running Real Analysis
+[ ][CORE][12/12/23-02:57:38][INFO] Running Statistical Analysis
+[ ][CORE][12/12/23-03:04:29][INFO] Building Pvalues result
+[ ][CORE][12/12/23-03:04:29][INFO] Building results
+```
+

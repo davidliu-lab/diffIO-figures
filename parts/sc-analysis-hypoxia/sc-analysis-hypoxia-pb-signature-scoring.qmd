@@ -1,0 +1,545 @@
+---
+title: "Signature scoring from PB"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(GSVA)
+library(liger)
+
+file_cache_dir <- file.path(cache_dir, "sc-analysis-hypoxia-pb-signature-scoring")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+
+# Read in data
+
+## data frames
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(aucell_df, by = c("cell_label" = "cell")) %>% 
+  left_join(mean_hypoxia_df)
+immune_prop_df <- read_tsv(file.path(results_dir, "sc_immune_prop_df.tsv")) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c(
+    "immune low", "immune mid", "immune high"
+  )))
+```
+
+```{r}
+pb_tidy <- readRDS(file.path(data_dir, "scRNAseq", "sc_pb_tidy.rds"))
+
+log1p_cpm_mtx <- pb_tidy %>% 
+  pivot_wider(id_cols = gene, 
+              names_from = c(sample_ID, cell_type), 
+              values_from = log1p_CPM, 
+              values_fill = 0) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix()
+```
+
+```{r}
+gs_vec <- readRDS(file.path(results_dir, "gs_vec.rds"))
+hypoxia_vec <- readRDS(file.path(results_dir, "hypoxia_gs_vec.rds"))
+prog_vs_term_exh <- readRDS(here("results", "gs_vec_prog.vs.term_exh.rds"))
+dc_gs_vec <- readRDS(file.path(results_dir, "dc_gs_vec.rds"))
+exh_gs_vec <- readRDS(file.path(results_dir, "exh_gs_vec.rds"))
+```
+
+# Run ssGSEA
+
+## On T cell signatures
+
+```{r}
+exh_gs_vec <- c(
+  gs_vec[str_subset(names(gs_vec), "TCELL|T_CELL")], 
+  exh_gs_vec
+)
+```
+
+```{r}
+ssgsea_exh_df <- run_or_readRDS(
+  file.path(file_cache_dir, "ssgsea_exh_df.rds"), 
+  function() {
+    gsva(
+      log1p_cpm_mtx[,str_subset(colnames(log1p_cpm_mtx), "CD8|Naive|Treg")],
+      gset.idx.list = c(exh_gs_vec, prog_vs_term_exh),
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+ssgsea_exh_tidy <- ssgsea_exh_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_celltype", values_to = "score") %>% 
+  separate(sample_celltype, into = c("sample_ID", "cell_type"), sep = "_") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME, cell_type) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup() 
+```
+
+
+
+
+### Plot results
+
+```{r, fig.asp = 1/2, fig.width = 6}
+plot_list <- ssgsea_exh_tidy %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  named_group_split(NAME) 
+plot_list %>% 
+  imap(~{
+    ..1 %>% 
+      ggplot() +
+      aes(mean_hypoxia, zscore) +
+      geom_point(size = 2) +
+      stat_smooth(method = "lm") + 
+      stat_cor(method = "pearson") + 
+      facet_grid( ~ cell_type) + 
+      labs(title = str_wrap(str_replace_all(..2, "_", " "), width = 20))
+  })
+```
+
+```{r, fig.asp = 1, fig.width = 4}
+plot_df <- ssgsea_exh_tidy %>% 
+  filter(cell_type == "CD8+ T") %>% 
+  pivot_wider(id_cols = sample_ID, 
+              names_from = NAME, 
+              values_from = zscore) %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  mutate(GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13 = 
+           GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP - GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_DN) 
+plot_df %>% 
+  ggplot() + 
+  aes(mean_hypoxia, GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13) + 
+  geom_point(size = 2) +
+  stat_smooth(method = "lm") + 
+  stat_cor(method = "pearson") + 
+  labs(y = "Signature score", 
+       title = str_replace_all("GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13", "_", " ") %>% str_wrap(width = 20)) + 
+  scale_x_continuous(limits = c(NA, 2.46))
+  
+
+```
+
+## On more
+
+### On SPP1+ signature
+
+```{r}
+wei_signature_df <- 
+  read_excel(here("data", "signatures", "Wei_supptable3.xlsx"),
+             sheet = "3-5", 
+             skip = 4)
+wei_signature_df2 <- 
+  read_excel(here("data", "signatures", "Wei_supptable3.xlsx"),
+             sheet = "3-3", 
+             skip = 2)
+```
+
+```{r}
+grab_genes_for_sig <- function(df, colstr) {
+  df %>% 
+    filter(!is.na(get(colstr))) %>% 
+    .[[colstr]]
+}
+wei_gs_vec <- list(
+  "SPP1+TAMs" = grab_genes_for_sig(wei_signature_df, "SPP1+TAMs"), 
+  "M1" = grab_genes_for_sig(wei_signature_df2, "M1 Macrophage Polarization"), 
+  "M2" = grab_genes_for_sig(wei_signature_df2, "M2 Macrophage Polarization"), 
+  "Pro-inflamm" = grab_genes_for_sig(wei_signature_df2, "Pro inflammatory"), 
+  "Anti-inflammatory" = grab_genes_for_sig(wei_signature_df2, "Anti-inflammatory")
+)
+```
+
+```{r}
+ssgsea_more_df <- run_or_readRDS(
+  file.path(file_cache_dir, "ssgsea_more_df.rds"), 
+  function() {
+    gsva(
+      log1p_cpm_mtx[,str_subset(colnames(log1p_cpm_mtx), "TAM|DC")],
+      gset.idx.list = c(wei_gs_vec),
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+ssgsea_more_tidy <- ssgsea_more_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_celltype", values_to = "score") %>% 
+  separate(sample_celltype, into = c("sample_ID", "cell_type"), sep = "_") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME, cell_type) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup() 
+```
+
+```{r}
+ssgsea_more_tidy %>% 
+  filter(cell_type == "TAM") %>% 
+  left_join(mean_hypoxia_df, by = "sample_ID") %>% 
+  ggplot() + 
+  aes(mean_hypoxia, zscore) + 
+  geom_point(size = 2) + 
+  stat_cor(method = "pearson") + 
+  stat_smooth(method = "lm") + 
+  facet_wrap(~NAME, scale = "free")
+```
+
+
+## On DC signatures
+
+```{r}
+ssgsea_dc_df <- run_or_readRDS(
+  file.path(file_cache_dir, "ssgsea_dc_df.rds"), 
+  function() {
+    gsva(
+      log1p_cpm_mtx[,str_subset(colnames(log1p_cpm_mtx), "DC")],
+      gset.idx.list = c(dc_gs_vec),
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+ssgsea_dc_tidy <- ssgsea_dc_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_celltype", values_to = "score") %>% 
+  separate(sample_celltype, into = c("sample_ID", "cell_type"), sep = "_") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME, cell_type) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup() 
+```
+
+### Plot results
+
+```{r, fig.asp = 1/2, fig.width = 6}
+ssgsea_dc_tidy %>% 
+  left_join(mean_hypoxia_df, by = c("sample_ID")) %>% 
+  named_group_split(NAME) %>% 
+  imap(~{
+    ..1 %>% 
+      ggplot() +
+      aes(mean_hypoxia, zscore) +
+      geom_point(size = 2) +
+      stat_smooth(method = "lm") + 
+      facet_grid( ~ cell_type) + 
+      labs(title = str_wrap(str_replace_all(..2, "_", " "), width = 20))
+  })
+```
+
+# Run GSEA on hypoxia modeling
+
+```{r}
+pb_ols <- readRDS(here("results", "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified.rds"))
+```
+
+## run GSEA using liger
+
+```{r}
+estimate_list <- pb_ols %>% 
+  filter(term == "mean_hypoxia") %>%
+  arrange(desc(estimate)) %>%
+  named_group_split(cell_type) %>%
+  map( ~ set_names(.$estimate, .$gene))
+```
+
+```{r}
+names(estimate_list)
+```
+
+
+## Hypoxia sigs
+
+```{r}
+gsea_hypoxia_df <- run_or_readRDS(
+  file.path(file_cache_dir, "gsea_hypoxia_hi.v.lo_hypoxia_gs.rds"), 
+  function() {
+    gsea_list <- estimate_list %>% 
+      map(iterative.bulk.gsea, set.list = c(hypoxia_vec, gs_vec), power = 0)
+    gsea_df <- gsea_list %>% 
+      map_dfr(as_tibble, rownames = "gs_name", .id = "treatment")
+  }
+)
+```
+
+```{r, fig.asp = 1/4, fig.width = 12}
+gsea_hypoxia_df %>% 
+  filter(gs_name %in% c("HALLMARK_HYPOXIA", "HALLMARK_ANGIOGENESIS", "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", "HALLMARK_OXIDATIVE_PHOSPHORYLATION", names(hypoxia_vec))) %>% 
+  ggplot() + 
+  aes(gs_name, sscore) + 
+  geom_col(aes(color = p.val < 0.05)) + 
+  facet_grid(~treatment) + 
+  coord_flip()  + 
+  scale_color_manual(values = c("black", "red"))
+```
+
+```{r}
+gsea_hypoxia_mtx_df <- gsea_hypoxia_df %>% 
+  group_by(treatment, gs_name) %>% 
+  pivot_wider(id_cols = gs_name, 
+              names_from = treatment, 
+              values_from = sscore, 
+              values_fill = NA) %>% 
+  drop_na() %>% 
+  column_to_rownames("gs_name")
+gsea_hypoxia_mtx <- gsea_hypoxia_mtx_df %>% 
+  as.matrix()
+
+```
+
+
+```{r, fig.asp = 1/2, fig.width = 24}
+ht <- Heatmap(t(gsea_hypoxia_mtx),
+              height = unit(1, "in"),
+              name = "sscore",
+              show_column_names = T)
+draw(ht)
+```
+
+
+```{r, fig.asp = 1/2, fig.width = 5}
+ht <- Heatmap(t(gsea_hypoxia_mtx),
+              col = colorRamp2(breaks = c(-3, 0, 4), 
+                               colors = c("pink", "white", "black")), 
+              height = unit(1.2, "in"),
+              name = "sscore",
+              show_column_names = F)
+draw(ht)
+```
+
+```{r}
+rownames(gsea_hypoxia_mtx) %>% str_subset("ADHESION")
+```
+
+## DC sigs
+
+```{r}
+gsea_hypoxia_dc_df <- run_or_readRDS(
+  file.path(file_cache_dir, "gsea_hypoxia_hi.v.lo_dc_gs.rds"), 
+  function() {
+    gsea_list <- estimate_list[c("DC")] %>% 
+      map(iterative.bulk.gsea, 
+          set.list = c(dc_gs_vec), 
+          power = 0)
+    gsea_df <- gsea_list %>% 
+      map_dfr(as_tibble, rownames = "gs_name", .id = "treatment")
+  }
+)
+```
+
+```{r, fig.asp = 1/2, fig.width = 10}
+gsea_hypoxia_dc_df %>% 
+  ggplot() + 
+  aes(gs_name, sscore) + 
+  geom_col(aes(color = p.val < 0.05)) + 
+  facet_grid(~treatment) + 
+  coord_flip()  + 
+  scale_color_manual(values = c("black", "red"))
+```
+
+## T cell sigs
+
+```{r}
+gsea_hypoxia_tcell_df <- run_or_readRDS(
+  file.path(file_cache_dir, "gsea_hypoxia_hi.v.lo_tcell_gs.rds"), 
+  function() {
+    gsea_list <- estimate_list[c("CD8+ T", "Tregs", "Naive-like T")] %>% 
+      map(iterative.bulk.gsea, 
+          set.list = c(exh_gs_vec), 
+          power = 0)
+    gsea_df <- gsea_list %>% 
+      map_dfr(as_tibble, rownames = "gs_name", .id = "treatment")
+  }
+)
+```
+
+```{r, fig.asp = 1/1.8, fig.width = 12}
+gsea_hypoxia_tcell_df %>% 
+  ggplot() + 
+  aes(gs_name, sscore) + 
+  geom_col(aes(color = p.val < 0.05)) + 
+  facet_grid(~treatment) + 
+  coord_flip()  + 
+  scale_color_manual(values = c("black", "red"))
+```
+
+Leading edge genes: 
+
+```{r}
+pb_ols %>% 
+  filter(cell_type == "CD8+ T") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  mutate(exh_genes = gene %in% exh_gs_vec$GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_DN, 
+         eff_genes = gene %in% exh_gs_vec$GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP) %>% 
+  ungroup() %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_segment(aes(xend = rank, yend = 0),
+               data = ~..1 %>% filter(exh_genes), 
+               color = "blue") +
+  geom_segment(aes(xend = rank, yend = 0),
+               data = ~..1 %>% filter(eff_genes), 
+               color = "red") +
+  geom_text_repel(aes(label = gene), 
+                  data = ~..1 %>% 
+                    filter(eff_genes) %>% 
+                    arrange(estimate) %>% 
+                    head(6), 
+                  color = "red", 
+                  max.overlaps = Inf) + 
+  geom_text_repel(aes(label = gene), 
+                  data = ~..1 %>% 
+                    filter(exh_genes) %>% 
+                    arrange(desc(estimate)) %>% 
+                    head(6), 
+                  color = "blue", 
+                  max.overlaps = Inf) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  labs(title = str_replace_all("GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13", "_", " ") %>% str_wrap(width = 30))
+```
+
+
+```{r}
+pb_ols %>% 
+  filter(cell_type == "CD8+ T") %>% 
+  filter(term == "mean_hypoxia") %>% 
+  mutate(exh_genes = gene %in% exh_gs_vec$GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_DN, 
+         eff_genes = gene %in% exh_gs_vec$GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP) %>% 
+  ungroup() %>% 
+  arrange(estimate) %>% 
+  mutate(rank = row_number()) %>% 
+  ggplot() + 
+  aes(rank, estimate) + 
+  geom_segment(aes(xend = rank, yend = 0),
+               data = ~..1 %>% filter(exh_genes), 
+               color = "blue") +
+  geom_segment(aes(xend = rank, yend = 0),
+               data = ~..1 %>% filter(eff_genes), 
+               color = "red") +
+  geom_text_repel(aes(label = gene), 
+                  data = ~..1 %>% 
+                    filter(eff_genes) %>% 
+                    arrange(estimate) %>% 
+                    head(6), 
+                  color = "red", 
+                  max.overlaps = Inf) + 
+  geom_text_repel(aes(label = gene), 
+                  data = ~..1 %>% 
+                    filter(exh_genes) %>% 
+                    arrange(desc(estimate)) %>% 
+                    head(6), 
+                  color = "blue", 
+                  max.overlaps = Inf) + 
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_line() + 
+  labs(title = str_replace_all("GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13", "_", " ") %>% str_wrap(width = 30))
+```
+
+
+## Run GSEA on hypoxia modeling imm strat
+
+```{r}
+pb_ols_imm <- readRDS(here("results", "sc-analysis-hypoxia-pb-gene-expr-modeling-simplified-imm-strat.rds"))
+```
+
+## run GSEA using liger
+
+```{r}
+estimate_list_imm <- pb_ols_imm %>% 
+  filter(term == "mean_hypoxia") %>%
+  arrange(desc(estimate)) %>%
+  named_group_split(cell_type, immune_hi.v.lo) %>%
+  map( ~ set_names(.$estimate, .$gene))
+```
+
+```{r}
+names(estimate_list_imm)
+```
+
+
+## All sigs
+
+```{r}
+gsea_hypoxia_df_imm <- run_or_readRDS(
+  file.path(file_cache_dir, "gsea_hypoxia_hi.v.lo_hypoxia_gs_imm.strat.rds"), 
+  function() {
+    gsea_list <- estimate_list_imm %>% 
+      map(iterative.bulk.gsea, set.list = c(hypoxia_vec, gs_vec), power = 0)
+    gsea_df <- gsea_list %>%
+      map_dfr(as_tibble, rownames = "gs_name", .id = "cell_type_immstrat")
+    gsea_hypoxia_df_imm <- gsea_hypoxia_df_imm %>%
+      separate(
+        cell_type_immstrat,
+        into = c("cell_type", "immune_hi.v.lo"),
+        sep = " / "
+      )
+  }
+)
+```
+
+```{r, fig.asp = 1, fig.width = 12}
+gsea_hypoxia_df_imm %>% 
+  filter(gs_name %in% c("HALLMARK_HYPOXIA", "HALLMARK_ANGIOGENESIS", "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", "HALLMARK_OXIDATIVE_PHOSPHORYLATION", names(hypoxia_vec))) %>% 
+  ggplot() + 
+  aes(gs_name, sscore) + 
+  geom_col(aes(color = p.val < 0.05)) + 
+  facet_grid(cell_type~immune_hi.v.lo) + 
+  coord_flip()  + 
+  scale_color_manual(values = c("black", "red"))
+```
+
+```{r}
+gsea_hypoxia_mtx_df_imm <- gsea_hypoxia_df_imm %>% 
+  pivot_wider(id_cols = gs_name, 
+              names_from = c(immune_hi.v.lo, cell_type), 
+              values_from = sscore, 
+              values_fill = NA) %>% 
+  drop_na() %>% 
+  column_to_rownames("gs_name")
+gsea_hypoxia_mtx_imm <- gsea_hypoxia_mtx_df_imm %>% 
+  as.matrix()
+
+```
+
+
+```{r, fig.asp = 1/2, fig.width = 24}
+ht <- Heatmap(t(gsea_hypoxia_mtx_imm),
+              height = unit(1, "in"),
+              name = "sscore",
+              show_column_names = T)
+draw(ht)
+```
+
+
+```{r, fig.asp = 1/2, fig.width = 5}
+ht <- Heatmap(t(gsea_hypoxia_mtx_imm),
+              col = colorRamp2(breaks = c(-3, 0, 4), 
+                               colors = c("pink", "white", "black")), 
+              height = unit(1.2, "in"),
+              name = "sscore",
+              show_column_names = F)
+draw(ht)
+```
+
+
+

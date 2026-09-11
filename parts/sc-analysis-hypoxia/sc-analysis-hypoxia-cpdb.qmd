@@ -1,0 +1,418 @@
+---
+title: "CellPhoneDB Hypoxia Comparison"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-cellphonedb")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+mean_hypoxia_df <- readRDS(file.path(data_dir, "scRNAseq", "mean_hypoxia_df.rds"))
+cpdb_tidy <- readRDS(file.path(results_dir, "cpdb_tidy.rds")) %>% 
+    mutate(sample_ID = str_remove(id, "cpdb_")) %>%
+    left_join(mean_hypoxia_df, by = "sample_ID") 
+```
+
+# Plot specific interactions
+
+```{r, fig.asp = 1}
+plot_interacting_pair <- function(cpdb_tidy, interacting_pair_str, 
+                                  cell_type_str) {
+  cpdb_tidy %>%
+    filter(interacting_pair == interacting_pair_str) %>%
+    filter(str_detect(name, cell_type_str)) %>%
+    drop_na(value.mean) %>%
+    ggplot() +
+    aes(id, name, size = value.mean) +
+    geom_point(aes(color = -log10(value.pval + 1e-4))) +
+    geom_point(
+      shape = 1,
+      color = "red",
+      stroke = 2,
+      data = ~ ..1 %>%
+        filter(value.pval < 0.05)
+    ) +
+    scale_color_viridis() +
+    rotate_x_text() +
+    labs(title = interacting_pair_str) +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r, fig.asp = 1}
+plot_interacting_pair(cpdb_tidy, "IL10_receptor_IL10", "DC") + 
+  facet_grid(~hypoxia_hi.v.lo, scale = "free_x")
+```
+
+# Chord Diagrams
+
+## Example
+
+```{r}
+data <- matrix(c(
+  10, 30, 40, 20,
+  25, 15, 35, 30,
+  15, 25, 20, 10,
+  30, 20, 10, 15
+), ncol = 4, byrow = TRUE)
+
+# Create a chord diagram with annotations
+chordDiagram(
+  x = data,
+  transparency = 0.5, 
+  directional = 1
+)
+```
+
+## Data Set up
+
+```{r}
+cpdb_tidy_sep <- cpdb_tidy %>% 
+  separate(name, into = c("from", "to"), sep = "\\|")
+```
+
+## Test visualizations
+
+```{r}
+data <- cpdb_tidy_sep %>%
+  filter(id == "cpdb_11967") %>%
+  filter(annotation_strategy == "curated") %>% 
+  mutate(signif = case_when(value.pval %>% is.na() ~ FALSE,
+                            value.pval < 0.05 ~ TRUE,
+                            TRUE ~ FALSE)) %>%
+  group_by(from, to, signif) %>%
+  summarise(value = n()) %>%
+  mutate(color = ifelse(signif, "black", NA))
+chordDiagram(
+  x = data %>% select(-signif),
+  transparency = 0.5,
+  col = data$color, 
+  directional = 1,
+  direction.type = "arrows",
+  link.arr.length = 0.2,
+  link.lwd = 1, 
+  link.lty = 1, 
+  link.border = "black"
+)
+```
+
+
+```{r}
+data <- cpdb_tidy_sep %>%
+  filter(id == "cpdb_11967") %>%
+  filter(annotation_strategy == "curated") %>% 
+  mutate(signif = case_when(value.pval %>% is.na() ~ FALSE,
+                            value.pval < 0.05 ~ TRUE,
+                            TRUE ~ FALSE)) %>%
+  group_by(from, to) %>%
+  summarise(value = sum(signif) > 0) %>% 
+  mutate(color = ifelse(value, "grey", NA))
+chordDiagram(
+  x = data,
+  transparency = 0.5,
+  col = data$color, 
+  directional = 0
+)
+```
+
+## For each sample
+
+### Hypoxic samples
+
+```{r}
+id_strs <- cpdb_tidy_sep %>% 
+  filter(hypoxia_hi.v.lo == "high hypoxia") %>% 
+  .$id %>% 
+  unique()
+for (id_str in id_strs) {
+  data <- cpdb_tidy_sep %>% 
+    filter(id == id_str) %>% 
+    filter(annotation_strategy == "curated") %>% 
+    mutate(signif = case_when(
+      value.pval %>% is.na() ~ FALSE, 
+      value.pval < 0.05 ~ TRUE, 
+      TRUE ~ FALSE
+    )) %>% 
+    group_by(from, to, signif) %>% 
+    summarise(count = n()) %>% 
+    mutate(color = ifelse(signif, "red", NA))
+  chordDiagram(
+    x = data %>% select(-signif),
+    col = data$color, 
+    directional = 1,
+    direction.type = "arrows", 
+    link.arr.length = 0.2,
+    link.lwd = 1, 
+    link.lty = 1, 
+    link.border = "black"
+  )
+  text(0,0,str_remove(id_str, "cpdb_"))
+  circos.clear()
+}
+```
+
+### Non-hypoxic samples
+
+```{r}
+id_strs <- cpdb_tidy_sep %>% 
+  filter(hypoxia_hi.v.lo == "low hypoxia") %>% 
+  .$id %>% 
+  unique()
+for (id_str in id_strs) {
+  data <- cpdb_tidy_sep %>% 
+    filter(id == id_str) %>% 
+    filter(annotation_strategy == "curated") %>% 
+    mutate(signif = case_when(
+      value.pval %>% is.na() ~ FALSE, 
+      value.pval < 0.05 ~ TRUE, 
+      TRUE ~ FALSE
+    )) %>% 
+    group_by(from, to, signif) %>% 
+    summarise(count = n()) %>% 
+    mutate(color = ifelse(signif, "red", NA))
+  chordDiagram(
+    x = data %>% select(-signif),
+    col = data$color, 
+    directional = 1,
+    direction.type = "arrows", 
+    link.arr.length = 0.2,
+    link.lwd = 1, 
+    link.lty = 1, 
+    link.border = "black"
+  )
+  text(0,0,str_remove(id_str, "cpdb_"))
+  circos.clear()
+}
+```
+
+
+### Mid hypoxic
+
+```{r}
+id_strs <- cpdb_tidy_sep %>% 
+  filter(hypoxia_hi.v.lo == "mid hypoxia") %>% 
+  .$id %>% 
+  unique()
+for (id_str in id_strs) {
+  data <- cpdb_tidy_sep %>% 
+    filter(id == id_str) %>% 
+    filter(annotation_strategy == "curated") %>% 
+    mutate(signif = case_when(
+      value.pval %>% is.na() ~ FALSE, 
+      value.pval < 0.05 ~ TRUE, 
+      TRUE ~ FALSE
+    )) %>% 
+    group_by(from, to, signif) %>% 
+    summarise(count = n()) %>% 
+    mutate(color = ifelse(signif, "red", NA))
+  chordDiagram(
+    x = data %>% select(-signif),
+    col = data$color, 
+    directional = 1,
+    direction.type = "arrows", 
+    link.arr.length = 0.2,
+    link.lwd = 1, 
+    link.lty = 1, 
+    link.border = "black"
+  )
+  text(0,0,str_remove(id_str, "cpdb_"))
+  circos.clear()
+}
+```
+
+# Number of interactions, total
+
+```{r}
+n_int_df <- cpdb_tidy_sep %>% 
+  mutate(value.qval = p.adjust(value.pval, method = "BH")) %>% 
+  filter(value.qval < 0.05) %>% 
+  group_by(sample_ID, from, to) %>% 
+  summarise(n_int = n(), 
+            median_interaction_strength = median(value.mean), 
+            mean_interaction_strength = mean(value.mean)) %>% 
+  group_by(from, to) %>% 
+  mutate(mean_n_int = mean(n_int)) %>% 
+  ungroup()
+```
+
+```{r, fig.asp = 0.8, fig.width = 5}
+n_int_df %>% 
+  ggplot() + 
+  aes(1, n_int, fill = mean_n_int) + 
+  geom_violin(scale = "width", linewidth = 0.1) + 
+  facet_grid(factor(from, levels = sort(unique(from)))~factor(to, levels = rev(sort(unique(to))))) + 
+  scale_fill_viridis() + 
+  theme(axis.text = element_blank(), 
+        strip.background = element_blank(), 
+        strip.text.y = element_text(angle = 0, hjust = 0), 
+        strip.text.x = element_text(angle = 90, hjust = 0, vjust = 0.5)) + 
+  remove_spines()
+```
+
+# Number of interactions, w hypoxia
+
+## Stromal vs tumor
+
+The number of stromal-tumor interactions increases as hypoxia increases, across all immune states. 
+
+```{r}
+n_int_stromal <- cpdb_tidy_sep %>% 
+  filter((from == "Stromal" & to == "Tumor") | (to == "Stromal" & from == "Tumor")) %>% 
+  mutate(value.qval = p.adjust(value.pval, method = "BH")) %>% 
+  filter(value.qval < 0.05) %>% 
+  group_by(sample_ID) %>% 
+  summarise(ninteractions = n(), 
+            median_interaction_strength = median(value.mean)) %>% 
+  left_join(mean_hypoxia_df, by = "sample_ID")
+```
+
+```{r}
+n_int_stromal %>% 
+  # filter(immune_hi.v.lo == "immune high") %>% 
+  ggplot() + 
+  aes(mean_hypoxia, ninteractions) + 
+  geom_point(size = 3) + 
+  stat_smooth(method = "lm") + 
+  stat_cor() + 
+  facet_grid(~immune_hi.v.lo)
+```
+
+## Stromal vs myeloid
+
+The number of stromal-myeloid interactions is not associated with hypoxia in immune high
+
+```{r}
+n_int_stromal_m <- cpdb_tidy_sep %>% 
+  filter((from == "Stromal" & to == "DC") | (to == "Stromal" & from == "DC") | (from == "Stromal" & to == "Mac/mono") | (to == "Stromal" & from == "Mac/mono") | (from == "Stromal" & to == "Neutrophil") | (to == "Stromal" & from == "Neutrophil")) %>% 
+  mutate(value.qval = p.adjust(value.pval, method = "BH")) %>% 
+  filter(value.qval < 0.05) %>% 
+  group_by(sample_ID) %>% 
+  summarise(ninteractions = n(), 
+            median_interaction_strength = median(value.mean)) %>% 
+  left_join(mean_hypoxia_df, by = "sample_ID")
+```
+
+```{r}
+n_int_stromal_m %>% 
+  # filter(immune_hi.v.lo == "immune high") %>% 
+  ggplot() + 
+  aes(mean_hypoxia, ninteractions) + 
+  geom_point(size = 3) + 
+  stat_smooth(method = "lm") + 
+  stat_cor() + 
+  facet_grid(~immune_hi.v.lo)
+```
+
+## Stromal vs immune
+
+The number of stromal-immune interactions is not associated with hypoxia in immune high
+
+```{r}
+n_int_stromal_imm <- cpdb_tidy_sep %>% 
+  filter(from == "Stromal" | to == "Stromal") %>% 
+  filter(!(from == "Stromal" & to == "Tumor")) %>% 
+  filter(!((to == "Stromal" & from == "Tumor"))) %>% 
+  mutate(value.qval = p.adjust(value.pval, method = "BH")) %>% 
+  filter(value.qval < 0.05) %>% 
+  group_by(sample_ID) %>% 
+  summarise(ninteractions = n(), 
+            median_interaction_strength = median(value.mean)) %>% 
+  left_join(mean_hypoxia_df, by = "sample_ID")
+```
+
+```{r}
+n_int_stromal_imm %>% 
+  # filter(immune_hi.v.lo == "immune high") %>% 
+  ggplot() + 
+  aes(mean_hypoxia, ninteractions) + 
+  geom_point(size = 3) + 
+  stat_smooth(method = "lm") + 
+  stat_cor() + 
+  facet_grid(~immune_hi.v.lo)
+```
+
+# What stromal to tumor interactions
+
+```{r}
+cpdb_stromal_tumor <- cpdb_tidy_sep %>% 
+  filter((from == "Stromal" & to == "Tumor") | (to == "Stromal" & from == "Tumor")) %>% 
+  mutate(value.qval = p.adjust(value.pval, method = "BH")) %>% 
+  filter(value.qval < 0.05) 
+```
+
+```{r}
+cpdb_stromal_tumor %>% 
+  filter(immune_hi.v.lo == "immune high") %>% 
+  group_by(interacting_pair, from, to) %>% 
+  summarise(n = n(),
+            avg.value.mean = mean(value.mean)) %>%
+  arrange(desc(n), desc(avg.value.mean)) %>% 
+  filter(n > 3) %>% 
+  mutate(interacting_pair_from_to = paste0(interacting_pair, "_from", from, "_to", to)) %>% 
+  ggplot() + 
+  aes(fct_reorder(interacting_pair_from_to, n), n) + 
+  geom_col() + 
+  coord_flip()
+```
+
+
+```{r}
+cpdb_stromal_tumor %>% 
+  filter(immune_hi.v.lo == "immune high") %>% 
+  group_by(interacting_pair, from, to, gene_a, gene_b) %>% 
+  summarise(n = n(),
+            avg.value.mean = mean(value.mean)) %>%
+  arrange(desc(n), desc(avg.value.mean)) %>% 
+  head(10)
+```
+
+```{r}
+cpdb_stromal_tumor %>% 
+  filter(immune_hi.v.lo == "immune low") %>% 
+  group_by(interacting_pair, from, to, gene_a, gene_b) %>% 
+  summarise(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  head(10)
+```
+
+# What interactions with stromal cells
+
+```{r}
+cpdb_tidy_sep %>% 
+  filter(from == "Stromal" | to == "Stromal") %>% 
+  filter(value.pval < 0.05) %>% 
+  group_by(interacting_pair, hypoxia_hi.v.lo) %>% 
+  summarise(n_samples = length(unique(sample_ID))) %>% 
+  arrange(desc(n_samples)) %>% 
+  pivot_wider(id_cols = interacting_pair, 
+              names_from = hypoxia_hi.v.lo, 
+              values_from = n_samples, 
+              values_fill = 0) %>% 
+  mutate(rel_high_vs_low = `high hypoxia` - `low hypoxia`) %>% 
+  arrange(desc(rel_high_vs_low))
+```
+
+```{r}
+cpdb_tidy_sep %>% 
+  filter(from == "Stromal" | to == "Stromal") %>% 
+  filter(from == "DC" | to == "DC") %>% 
+  filter(value.pval < 0.05) %>% 
+  filter(annotation_strategy == "curated") %>% 
+  arrange(desc(value.mean))
+```
+
+
+

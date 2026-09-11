@@ -1,0 +1,180 @@
+---
+title: "TCGA immune high vs low"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+library(GSVA)
+
+file_cache_dir <- file.path(cache_dir, "tcga-analysis-immune-high-vs-low")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+
+tcga_data_dir <- file.path(data_dir, "TCGA_pan_can_atlas_2018", "skcm_tcga_pan_can_atlas_2018")
+```
+
+```{r}
+clin_patient <- read_tsv(file.path(tcga_data_dir, "data_clinical_patient.txt"))
+clin_sample <- read_tsv(file.path(tcga_data_dir, "data_clinical_sample.txt"))
+tpm_df <- run_or_readRDS(
+  file.path(tcga_data_dir, "data_mrna_seq_v2_rsem_processed.rds"),
+  function() {
+    read_tsv(file.path(tcga_data_dir, "data_mrna_seq_v2_rsem.txt")) %>%
+      drop_na(Hugo_Symbol) %>%
+      select(-Entrez_Gene_Id) %>%
+      group_by(Hugo_Symbol) %>%
+      summarise_all(sum)
+  }
+)
+
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample_RNA", 
+               values_to = "value")
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("Hugo_Symbol") %>% 
+  as.matrix() 
+```
+
+```{r}
+signature_df <- read_excel(
+  file.path(data_dir, "signatures", "1-s2.0-S1535610821002221-mmc2.xlsx"), 
+  sheet = "Gene Description", 
+  skip = 1
+) 
+
+signature_list <- signature_df %>% 
+  named_group_split(`Gene signature`) %>% 
+  map(~.$Gene) 
+```
+
+```{r}
+bagaev_ssgsea_df <- run_or_readRDS(
+  file.path(file_cache_dir, "bagaev_ssgsea.rds"), 
+  function() {
+    gsva(
+      tpm_matrix,
+      gset.idx.list = signature_list,
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>%
+      as_tibble(rownames = "gs_name")
+  }
+)
+bagaev_ssgsea_tidy <- bagaev_ssgsea_df %>% 
+  pivot_longer(cols = 2:ncol(.), names_to = "sample_RNA", values_to = "score") %>% 
+  dplyr::rename(NAME = gs_name) %>% 
+  group_by(NAME) %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  ungroup()
+write_tsv(bagaev_ssgsea_df, file.path(results_dir, "tcga_skcm_bagaev_ssgsea_df.tsv"))
+```
+
+```{r}
+h_mtx <- bagaev_ssgsea_tidy %>% 
+  pivot_wider(id_cols = NAME, 
+              names_from = sample_RNA, 
+              values_from = zscore) %>% 
+  column_to_rownames("NAME") %>% 
+  as.matrix()
+
+Heatmap(h_mtx, 
+        show_column_names = FALSE)
+```
+
+```{r, fig.asp = 0.9}
+#| fig-asp: 0.9
+
+
+Heatmap(cor(t(h_mtx), method = "spearman"), 
+        name = "spearman\ncorr. ", 
+        col = colorRamp2(breaks = c(-1, 0, 1), 
+                         colors = palette_cor), 
+        row_split = 3, 
+        column_split = 3)
+```
+
+```{r}
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+immune_signatures
+```
+
+```{r}
+h_row_dist <- dist(h_mtx[immune_signatures,])
+row_dend <- as.dendrogram(hclust(h_row_dist)) %>% 
+  reorder(h_row_dist)
+h_col_dist <- stats::dist(t(h_mtx[immune_signatures,]), method = "euclidean")
+col_hclust <- hclust(h_col_dist)
+col_dend <- as.dendrogram(col_hclust) %>% 
+  reorder(h_col_dist, method = "OLO")
+
+h <- Heatmap(
+  h_mtx[immune_signatures, ],
+  show_column_names = FALSE,
+  cluster_rows = row_dend,
+  cluster_column_slices = FALSE, 
+  column_dend_reorder = TRUE, 
+  column_split = cutree(col_hclust, 2)
+)
+
+h_col_dend <- column_dend(draw(h))
+```
+
+```{r}
+kcluster_df <- h_col_dend %>% 
+  imap_dfr(~tibble(sample_RNA = labels(..1), 
+                   kcluster = ..2)) %>% 
+  mutate(immune_hi.v.lo = case_when(
+    kcluster %in% c("2") ~ "immune high", 
+    kcluster %in% c("1") ~ "immune low"
+  ))
+```
+
+## Silhouette Score
+
+```{r}
+max_clusters <- 20
+cluster_out <-
+  map(set_names(2:max_clusters), ~ cutree(col_hclust, k = ..1))
+sil_out <-
+  map(cluster_out, ~ cluster::silhouette(..1, h_col_dist))
+sil_width_df <- imap_dfr(sil_out, ~ data.frame(
+  k = ..2,
+  avg_sil_width = mean(as_tibble(..1)$sil_width)
+))
+sil_width_df %>%
+  mutate(k = factor(k, levels = 2:max_clusters)) %>% 
+  ggplot() +
+  aes(k, avg_sil_width) +
+  geom_col() +
+  labs(x = "K",
+       y = "Average Silhouette Width") +
+  geom_hline(yintercept = 0.4, color = "red") + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.45)) + 
+  theme(axis.line.x = element_blank(), 
+        axis.ticks.x = element_blank())
+```
+
+## Calculate immune score
+
+```{r}
+immune_zscore_df <- bagaev_ssgsea_tidy %>% 
+  filter(NAME %in% immune_signatures) %>% 
+  group_by(sample_RNA) %>% 
+  summarise(immune_zscore = mean(zscore)) 
+immune_hi.v.lo_df <- kcluster_df %>% 
+  left_join(immune_zscore_df, by = "sample_RNA")
+immune_hi.v.lo_df
+saveRDS(immune_hi.v.lo_df, file.path(results_dir, "tcga_immune_hi.v.lo.rds"))
+write_tsv(immune_hi.v.lo_df, file.path(results_dir, "tcga_immune_hi.v.lo.txt"))
+```
+
+

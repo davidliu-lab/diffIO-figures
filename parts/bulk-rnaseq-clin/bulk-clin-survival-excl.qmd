@@ -1,0 +1,47 @@
+---
+title: "Inclusion in survival analysis"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+# Purpose
+
+The purpose of this chapter is to identify which patient samples we're not including in survival and response analyses. 
+
+# Set up
+
+We'll start by reading in the clinical metadata table.  
+
+```{r}
+bulk_clin_metadata <- read_tsv(here("data", "bulk", "bulk-clin-metadata.tsv"))
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  group_by(cohort) %>% 
+  count()
+```
+
+There are 59 patients which were sequentially treated. 
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(cohort == "2016 Weber") %>% 
+  nrow()
+```
+
+```{r}
+bulk_clin_metadata %>% 
+  filter(cohort == "2023 Campbell (067)")
+```
+
+
+

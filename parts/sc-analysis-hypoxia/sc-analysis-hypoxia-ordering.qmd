@@ -1,0 +1,197 @@
+---
+title: "scRNAseq Hypoxia Ordering"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+file_cache_dir <- file.path(cache_dir, "sc-analysis-hypoxia-ordering")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+immune_score_df <- readRDS(file.path(results_dir, "sc_immune_prop_df.rds"))
+ucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_ucell_scores_df.rds"))
+aucell_df <- readRDS(file.path(data_dir, "scRNAseq", "adata_aucell_scores_df.rds"))
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv")) %>% 
+  left_join(ucell_df, by = c("cell_label" = "cell"))%>% 
+  left_join(aucell_df, by = c("cell_label" = "cell"))
+```
+
+```{r}
+obs_df %>% plot_umap(color_str = "HALLMARK_HYPOXIA_UCell")
+obs_df %>% plot_umap(color_str = "HALLMARK_HYPOXIA")
+```
+
+# Stratification with UCell
+
+```{r}
+mean_hypoxia_df <- obs_df %>% 
+  group_by(sample_ID) %>% 
+  summarise(mean_hypoxia = mean(HALLMARK_HYPOXIA_UCell), 
+            sd_hypoxia = sd(HALLMARK_HYPOXIA_UCell)) %>% 
+  left_join(immune_score_df, by = "sample_ID", suffix = c("", ".immune")) %>% 
+  mutate(hypoxia_hi.v.lo = case_when(
+    mean_hypoxia < quantile(mean_hypoxia, 0.333) ~ "low hypoxia", 
+    mean_hypoxia < quantile(mean_hypoxia, 0.666) ~ "mid hypoxia", 
+    TRUE ~ "high hypoxia"
+  )) %>% 
+  mutate(hypoxia_hi.v.lo = factor(hypoxia_hi.v.lo, levels = c("low hypoxia", "mid hypoxia", "high hypoxia")))
+mean_hypoxia_df %>% 
+  mutate(sample_ID = fct_reorder(sample_ID, mean_hypoxia)) %>% 
+  ggplot() + 
+  aes(sample_ID, mean_hypoxia, color = immune_hi.v.lo) +
+  geom_point(size = 3) + 
+  geom_segment(aes(xend = sample_ID, 
+                   y = mean_hypoxia - sd_hypoxia, 
+                   yend = mean_hypoxia + sd_hypoxia)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+  scale_color_manual(values = palette_immune_state) + 
+  facet_grid(~hypoxia_hi.v.lo, scale = "free_x")
+```
+
+
+# Stratification with AUCell
+
+```{r}
+mean_hypoxia_df <- obs_df %>% 
+  group_by(sample_ID) %>% 
+  summarise(mean_hypoxia = mean(HALLMARK_HYPOXIA), 
+            sd_hypoxia = sd(HALLMARK_HYPOXIA)) %>% 
+  left_join(immune_score_df, by = "sample_ID", suffix = c("", ".immune")) %>% 
+  mutate(hypoxia_hi.v.lo = case_when(
+    mean_hypoxia < quantile(mean_hypoxia, 0.333) ~ "low hypoxia", 
+    mean_hypoxia < quantile(mean_hypoxia, 0.666) ~ "mid hypoxia", 
+    TRUE ~ "high hypoxia"
+  )) %>% 
+  mutate(hypoxia_hi.v.lo = factor(hypoxia_hi.v.lo, levels = c("low hypoxia", "mid hypoxia", "high hypoxia")))
+mean_hypoxia_df %>% 
+  mutate(sample_ID = fct_reorder(sample_ID, mean_hypoxia)) %>% 
+  ggplot() + 
+  aes(sample_ID, mean_hypoxia, color = immune_hi.v.lo) +
+  geom_point(size = 3) + 
+  geom_segment(aes(xend = sample_ID, 
+                   y = mean_hypoxia - sd_hypoxia, 
+                   yend = mean_hypoxia + sd_hypoxia)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+  scale_color_manual(values = palette_immune_state) + 
+  facet_grid(~hypoxia_hi.v.lo, scale = "free_x")
+```
+
+Just gonna use AUCell from here on out. 
+
+# Hypoxia by compartment 
+
+```{r}
+obs_df %>% 
+  ggplot() + 
+  aes(compartment, HALLMARK_HYPOXIA) + 
+  geom_violin(draw_quantiles = 0.5)
+```
+
+```{r}
+obs_df %>% 
+  group_by(compartment, sample) %>% 
+  summarise(mean_hypoxia = mean(HALLMARK_HYPOXIA)) %>% 
+  ggplot() + 
+  aes(compartment, mean_hypoxia) + 
+  geom_boxplot() + 
+  geom_jitter(width = 0.2, size = 3)
+```
+
+```{r}
+new_obs_df <- obs_df %>% 
+  group_by(compartment) %>% 
+  mutate(HALLMARK_HYPOXIA_compartment_norm = as.vector(scale(HALLMARK_HYPOXIA))) 
+new_obs_df %>% 
+  ggplot() + 
+  aes(compartment, HALLMARK_HYPOXIA_compartment_norm) + 
+  geom_violin(draw_quantiles = 0.5)
+```
+
+
+## Compartment normalized stratification
+
+Method: 
+* z-score hypoxia score by compartment across all samples
+* calculate the mean compartment normalized hypoxia score
+* rank all the samples from low to high hypoxia
+
+```{r}
+mean_hypoxia_df <- new_obs_df %>% 
+  group_by(sample_ID) %>% 
+  summarise(mean_hypoxia = mean(HALLMARK_HYPOXIA_compartment_norm), 
+            sd_hypoxia = sd(HALLMARK_HYPOXIA_compartment_norm)) %>% 
+  left_join(immune_score_df, by = "sample_ID", suffix = c("", ".immune")) %>% 
+  mutate(hypoxia_hi.v.lo = case_when(
+    mean_hypoxia < quantile(mean_hypoxia, 0.333) ~ "low hypoxia", 
+    mean_hypoxia < quantile(mean_hypoxia, 0.666) ~ "mid hypoxia", 
+    TRUE ~ "high hypoxia"
+  )) %>% 
+  mutate(hypoxia_hi.v.lo = factor(hypoxia_hi.v.lo, levels = c("low hypoxia", "mid hypoxia", "high hypoxia")))
+mean_hypoxia_df %>% 
+  mutate(sample_ID = fct_reorder(sample_ID, mean_hypoxia)) %>% 
+  ggplot() + 
+  aes(sample_ID, mean_hypoxia, color = immune_hi.v.lo) +
+  geom_point(size = 3) + 
+  geom_segment(aes(xend = sample_ID, 
+                   y = mean_hypoxia - sd_hypoxia, 
+                   yend = mean_hypoxia + sd_hypoxia)) + 
+  remove_x_spine() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+  scale_color_manual(values = palette_immune_state) + 
+  facet_grid(~hypoxia_hi.v.lo, scale = "free_x")
+```
+
+```{r}
+
+mean_hypoxia_df_notnorm <- obs_df %>% 
+  group_by(sample_ID) %>% 
+  summarise(mean_hypoxia = mean(HALLMARK_HYPOXIA), 
+            sd_hypoxia = sd(HALLMARK_HYPOXIA)) %>% 
+  left_join(immune_score_df, by = "sample_ID", suffix = c("", ".immune")) %>% 
+  mutate(hypoxia_hi.v.lo = case_when(
+    mean_hypoxia < quantile(mean_hypoxia, 0.333) ~ "low hypoxia", 
+    mean_hypoxia < quantile(mean_hypoxia, 0.666) ~ "mid hypoxia", 
+    TRUE ~ "high hypoxia"
+  )) %>% 
+  mutate(hypoxia_hi.v.lo = factor(hypoxia_hi.v.lo, levels = c("low hypoxia", "mid hypoxia", "high hypoxia")))
+
+mean_hypoxia_df %>% 
+  left_join(mean_hypoxia_df_notnorm, by = "sample_ID", suffix = c(".norm", ".notnorm")) %>%
+  mutate(se_hypoxia.notnorm = sd_hypoxia.notnorm / sqrt(total.notnorm)) %>% 
+  mutate(se_hypoxia.norm = sd_hypoxia.norm / sqrt(total.norm)) %>% 
+  ggplot() + 
+  aes(mean_hypoxia.notnorm, mean_hypoxia.norm) + 
+  geom_point(size = 2, alpha = 0.8) + 
+  geom_segment(aes(xend = mean_hypoxia.notnorm - se_hypoxia.notnorm, 
+                   x = mean_hypoxia.notnorm + se_hypoxia.notnorm, 
+                   yend = mean_hypoxia.norm), 
+               alpha = 0.3) + 
+  geom_segment(aes(yend = mean_hypoxia.norm - se_hypoxia.norm, 
+                   y = mean_hypoxia.norm + se_hypoxia.norm, 
+                   xend = mean_hypoxia.notnorm), 
+               alpha = 0.3)  + 
+  stat_cor() 
+```
+
+
+```{r}
+mean_hypoxia_df %>% 
+  saveRDS(file.path(results_dir, "mean_hypoxia_df.rds"))
+```
+
+
+
+
+
+

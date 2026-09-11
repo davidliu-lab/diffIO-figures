@@ -1,0 +1,106 @@
+---
+title: "Clinical Variables and Response"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+# Set up
+
+We'll start by reading in the clinical metadata table.  
+
+```{r}
+bulk_clin_metadata <- read_tsv(here("data", "bulk", "bulk-clin-metadata.tsv")) %>% 
+  filter(is.na(excluded_clin))
+```
+
+# Response by...
+
+```{r}
+plot_response_by_var <- function(var) {
+  var <- enquo(var)
+  plot_df <- bulk_clin_metadata %>%
+    group_by(!!var, response_splitSD) %>%
+    count() %>%
+    group_by(!!var) %>%
+    mutate(prop = n / sum(n))
+  p <- plot_df %>%
+    ggplot() +
+    aes(!!var, prop, fill = response_splitSD) +
+    geom_col() +
+    scale_fill_manual(values = palette_response) +
+    scale_y_continuous(expand = c(0, 0)) +
+    remove_x_spine() + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+  p
+}
+
+plot_response_by_var_split_group <- function(var) {
+  var <- enquo(var)
+  plot_df <- bulk_clin_metadata %>%
+    group_by(!!var, response_splitSD, group) %>%
+    count() %>%
+    group_by(!!var, group) %>%
+    mutate(prop = n / sum(n))
+  p <- plot_df %>%
+    ggplot() +
+    aes(!!var, prop, fill = response_splitSD) +
+    geom_col() +
+    scale_fill_manual(values = palette_response) +
+    scale_y_continuous(expand = c(0, 0)) +
+    remove_x_spine() + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+  p + facet_grid( ~ group)
+}
+```
+
+
+## Sex
+
+```{r, fig.width = 4, fig.height = 3}
+#| fig-width: 4
+#| fig-height: 3
+
+plot_response_by_var(sex)
+```
+
+```{r, fig.width = 5, fig.height = 3}
+#| fig-width: 5
+#| fig-height: 3
+plot_response_by_var_split_group(sex)
+```
+
+
+## Treatment
+
+```{r}
+bulk_clin_metadata %>% 
+  drop_na(response_splitSD) %>% 
+  group_by(treatment, response_splitSD) %>% 
+  count() %>% 
+  group_by(treatment) %>% 
+  mutate(pct = n / sum(n), total = sum(n))
+```
+
+
+```{r, fig.width = 4, fig.height = 3}
+#| fig-width: 4
+#| fig-height: 3
+
+plot_response_by_var(treatment)
+```
+
+```{r, fig.width = 5, fig.height = 3}
+#| fig-width: 5
+#| fig-height: 3
+plot_response_by_var_split_group(treatment)
+```
+
+

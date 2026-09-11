@@ -1,0 +1,117 @@
+---
+title: "exhausted T cell scoring"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-T-exh-scoring")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+# Read in data
+
+```{r}
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv"))
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+
+# specific_cluster_immune is the fine-grained annotation merged back from the
+# B/M/TNK subset chapters. No chapter in the book writes it onto so_immune.rds,
+# so take it from the obs table, which carries it for all 43411 cells.
+so_imm <- AddMetaData(so_imm, metadata = obs_df %>%
+  dplyr::select(cell_label, specific_cluster_immune) %>%
+  dplyr::filter(cell_label %in% colnames(so_imm)) %>%
+  tibble::column_to_rownames("cell_label"))
+prog_vs_term_df <- 
+  read_excel(here("data", "signatures", "41590_2019_312_MOESM4_ESM.xlsx"), 
+           sheet = "Tumor Prog. vs. Tumor Terminal")
+```
+
+# Make signatures
+
+```{r}
+filtered_df <- prog_vs_term_df %>% 
+  mutate(padj = as.numeric(padj)) %>% 
+  filter(padj < 0.05) %>% 
+  arrange(desc(log2FoldChange))
+```
+
+```{r}
+mouse_human_genes <- run_or_readRDS(
+  here("data", "signatures", "mouse_human_genes.rds"), 
+  function() {
+    library(biomaRt)
+    hmart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+    mmart <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+    
+    hgenes <- rownames(so_imm)
+    
+    mouse_human_genes <- getLDS(attributes = c("hgnc_symbol"), mart = hmart, values = hgenes,
+                                attributesL = c("mgi_symbol"), martL = mmart,
+                                verbose = TRUE)
+  }
+)
+```
+
+```{r}
+filtered_df2 <- filtered_df %>% 
+  left_join(mouse_human_genes, by = c("Gene" = "MGI.symbol")) %>% 
+  drop_na(HGNC.symbol)
+prog_vs_term_genes <- head(filtered_df2, 200)$HGNC.symbol
+term_vs_prog_genes <- tail(filtered_df2, 200)$HGNC.symbol
+```
+
+# Score signatures in T cells
+
+```{r}
+so_imm@meta.data$general_cluster_immune %>% unique()
+```
+
+```{r}
+so_CD8 <- subset(so_imm %>% set_idents("specific_cluster_immune"), idents = c("Naive-like T", "CD8+ T"))
+```
+
+```{r}
+features_to_score <- list(
+  prog_vs_term = prog_vs_term_genes, 
+  term_vs_prog = term_vs_prog_genes
+)
+saveRDS(features_to_score, here("results", "gs_vec_prog.vs.term_exh.rds"))
+```
+
+
+```{r}
+score_df <- AddModuleScore(so_CD8, features = features_to_score)@meta.data %>% 
+  dplyr::select(Cluster1, Cluster2) %>% 
+  dplyr::rename(prog_vs_term = Cluster1, term_vs_prog = Cluster2) %>% 
+  as_tibble(rownames = "cell")
+```
+
+```{r}
+cell_metadata_df <- get_metadata_from_so(so_CD8)
+```
+
+```{r, fig.asp = 1/2,  fig.width = 5}
+score_df %>% 
+  left_join(cell_metadata_df, by = "cell") %>% 
+  ggplot() + 
+  aes(prog_vs_term, term_vs_prog, color = specific_cluster_immune) + 
+  geom_hline(yintercept = 0, size = 0.2) +
+  geom_vline(xintercept = 0, size = 0.2) + 
+  geom_density2d() + 
+  scale_color_manual(values = palette_specific_immune) + 
+  facet_wrap(~specific_cluster_immune, ncol = 2) + 
+  theme(legend.position = "none")
+```
+
+

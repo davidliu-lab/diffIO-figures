@@ -1,0 +1,118 @@
+---
+title: "SCTransform Tumor"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages:
+library(Seurat)
+library(reticulate)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-sctransform-tumor")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{python}
+from pyhere import here
+from pathlib import Path
+import anndata
+adata = anndata.read_h5ad(Path(here(), "data", "scRNAseq", "adata_tumor.h5ad"))
+# reticulate mis-converts a categorical column whose codes are int32 (i.e.
+# >32767 levels; cell_barcode has 43k). Cast those to str so obs reaches R intact.
+for _c in adata.obs.columns:
+    if str(adata.obs[_c].dtype) == "category" and len(adata.obs[_c].cat.categories) > 32767:
+        adata.obs[_c] = adata.obs[_c].astype(str)
+```
+
+```{r}
+counts <- Matrix::t(py$adata$layers$get("counts"))
+rownames(counts) <- row.names(py$adata$var)
+colnames(counts) <- row.names(py$adata$obs)
+
+# Seurat 4's CreateSeuratObject ran make.names() on meta.data columns, turning
+# obs names like patient-clin into patient.clin; Seurat 5 keeps them verbatim.
+# The book refers to the dotted forms, so sanitize here.
+obs <- py$adata$obs
+names(obs) <- make.names(names(obs))
+so <- CreateSeuratObject(
+  counts = counts, 
+  project = "adata_tumor", 
+  assay = "RNA", 
+  meta.data = obs
+)
+so
+```
+
+```{r}
+so <- run_or_readRDS(
+  file.path(file_cache_dir, "so_tumor.rds"), 
+  function() {
+    run_seurat_rna_workflow(
+      so,
+      run_SCT = TRUE,
+      resolutions = seq(0.1, 1, 0.1),
+      dims = 1:30
+    )
+  }
+)
+```
+
+
+```{r}
+metadata_df <- get_metadata_from_so(so)
+```
+
+# Clustering Analysis
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+
+metadata_df %>%
+  dplyr::select(-SCT_snn_res.1) %>%
+  pivot_longer(cols = str_subset(colnames(.), "SCT_snn_res")) %>%
+  plot_umap(color_str = "value") +
+  geom_text_repel(
+    aes(label = value),
+    data = ~ ..1 %>%
+      group_by(name, value) %>%
+      summarise(UMAP_1 = mean(UMAP_1), UMAP_2 = mean(UMAP_2))
+  ) +
+  facet_wrap( ~ name) +
+  theme(legend.position = "none")
+```
+
+```{r, fig.asp = 1}
+#| fig-asp: 1
+metadata_df %>% 
+  plot_umap(color_str = "sample_ID", label = TRUE, pixels = c(1024, 1024)) + 
+  theme(legend.position = "none")
+metadata_df %>% 
+  mutate(patient.clin = factor(patient.clin)) %>% 
+  plot_umap(color_str = "patient.clin", label = TRUE, pixels = c(1024, 1024)) + 
+  theme(legend.position = "none") + 
+  stat_ellipse(aes(color = patient.clin))
+```
+
+```{r, fig.asp = 0.33, fig.width = 8}
+#| fig-asp: 0.33
+#| fig-width: 8
+
+genes <- c("PTPRC", "COL6A1", "MLANA", "SOX10")
+gene_df <- get_gene_expr_from_so(so, gene_vec = genes)
+metadata_df %>% 
+  left_join(gene_df) %>% 
+  pivot_longer(cols = genes) %>% 
+  plot_umap(color_str = "value") + 
+  facet_grid(~name) + 
+  scale_color_viridis()
+               
+```
+

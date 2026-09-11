@@ -1,0 +1,94 @@
+---
+title: "Add prior therapies"
+---
+
+Need to add prior targeted therapies. 
+
+## Set up
+
+```{r, message = FALSE}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+```{r, message = FALSE}
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv"))
+
+```
+
+## 2019 Gide
+
+```{r}
+
+
+gide_PD1_additions <- read_excel(here("data", "bulk", "Cancer Cell 2019 line of therpy_update.xlsx"),
+                                 sheet = "PD1") %>%
+  mutate(patient = paste0("PD1_", `Patient no.`)) %>%
+  mutate(updated_prior_MAPKi = ifelse(`Prior Targeted Therapy` == "Yes", 
+                                      "prior targeted therapy (BRAFi/MAPKi)", 
+                                      NA_character_)) %>% 
+  select(patient, updated_prior_MAPKi)
+
+gide_combo_additions <- read_excel(here("data", "bulk", "Cancer Cell 2019 line of therpy_update.xlsx"),
+                                   sheet = "PD1+CTLA4") %>%
+  mutate(patient = paste0("ipiPD1_", `Patient no.`)) %>% 
+  mutate(updated_prior_MAPKi = ifelse(`Prior Targeted Therapy` == "Yes", 
+                                      "prior targeted therapy (BRAFi/MAPKi)", 
+                                      NA_character_)) %>% 
+  select(patient, updated_prior_MAPKi)
+```
+
+
+```{r}
+
+gide_metadata <- bulk_clin_metadata %>% 
+  filter(cohort == "2019 Gide")
+new_gide_metadata <- gide_metadata %>% 
+  left_join(bind_rows(gide_combo_additions, gide_PD1_additions)) %>% 
+  mutate(prior_therapy = case_when(
+    prior_therapy == "none" & !is.na(updated_prior_MAPKi) ~ updated_prior_MAPKi, 
+    prior_therapy == "aCTLA4" & !is.na(updated_prior_MAPKi) ~ paste0(prior_therapy, "; ", updated_prior_MAPKi), 
+    TRUE ~ prior_therapy
+  ))
+
+
+```
+
+## 2019 Liu 
+
+```{r}
+liu_metadata_additions <- read_tsv(here("data", "bulk", "mat_rev3.tsv")) %>% 
+  filter(str_detect(Patient, "CA", negate = T)) %>% 
+  mutate(patient = paste0("MEL-", Patient)) %>% 
+  select(patient, prior_BRAFi)
+liu_metadata <- bulk_clin_metadata %>% 
+  filter(cohort == "2019 Liu") 
+new_liu_metadata <- liu_metadata %>% 
+  left_join(liu_metadata_additions, by = "patient") %>% 
+  mutate(prior_therapy = case_when(
+    prior_therapy == "none" & prior_BRAFi == 1 ~ "BRAFi", 
+    prior_BRAFi == 1 ~ paste0(prior_therapy, "; BRAFi"), 
+    TRUE ~ prior_therapy
+  ))
+```
+
+
+## Write
+
+```{r}
+
+bulk_clin_metadata_subset <- bulk_clin_metadata %>% 
+  filter(cohort != "2019 Gide") %>% 
+  filter(cohort != "2019 Liu")
+
+new_bulk_clin_metadata <- bind_rows(
+  new_gide_metadata, 
+  new_liu_metadata, 
+  bulk_clin_metadata_subset
+)
+write_tsv(new_bulk_clin_metadata, file.path(data_dir, "bulk", "bulk-clin-metadata-w-updated-targeted-therapies.tsv"))
+```
+
+
+

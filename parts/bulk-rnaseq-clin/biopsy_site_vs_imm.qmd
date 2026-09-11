@@ -1,0 +1,110 @@
+---
+title: "biopsy site vs immune state"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+```
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_rna_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-rna-metadata.tsv")) %>% 
+  select(patient, sample_RNA) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA")
+
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  drop_na(sample_RNA) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA") 
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+
+```
+
+```{r}
+clin_metadata <- readRDS(file.path(data_dir, "bulk", "cleaned_data_3_clin_metadata.rds")) %>% 
+  # drop_na(biopsy_site) %>% 
+  mutate(participant = case_when(
+    str_detect(participant, "^Mel-") ~ str_remove(participant, "Mel-"), 
+    str_detect(participant, "^Mel-ipi") ~ str_remove(participant, "Mel-ipi"),
+    TRUE ~ participant
+  )) %>% 
+  left_join(bulk_rna_metadata, by = c("participant" = "patient"))
+```
+
+```{r}
+other_clin_metadata <- read_tsv(here("data", "bulk", "mat_rev3.tsv"))
+schad_biopsy_data <- other_clin_metadata %>% 
+  drop_na(Biop_site) %>% 
+  select(Patient, Biop_site)
+schad_biopsy_data
+```
+
+```{r}
+clin_metadata %>% 
+  # filter(cohort == "Schadendorf anti-PD-1") %>% 
+  mutate(participant_join_giuseppe = str_remove(participant, "MEL-")) %>% 
+  left_join(schad_biopsy_data, by = c("participant_join_giuseppe" = "Patient")) %>% 
+  filter(cohort == "Schadendorf anti-PD-1") %>%
+  drop_na(Biop_site) %>% 
+  group_by(biopsy_site, Biop_site) %>% 
+  count()
+```
+
+```{r}
+clin_metadata %>% 
+  group_by(cohort, biopsy_site) %>% 
+  count() %>% 
+  pivot_wider(id_cols = c(biopsy_site), 
+              names_from = cohort, 
+              values_from = n) 
+```
+
+```{r}
+clin_metadata %>% 
+  group_by(immune_hi.v.lo) %>% 
+  count()
+```
+
+```{r}
+clin_metadata %>% 
+  group_by(biopsy_site, immune_hi.v.lo) %>% 
+  count() %>% 
+  pivot_wider(id_cols = biopsy_site, 
+              names_from = immune_hi.v.lo, 
+              values_from = n, 
+              values_fill = 0) %>% 
+  mutate(pct_imm_high = `immune high` / (`immune high` + `immune low`)) %>% 
+  drop_na(pct_imm_high) %>% 
+  select(-`NA`)
+```
+
+```{r}
+clin_metadata %>% 
+  mutate(grouped_biopsy_site = case_when(
+    biopsy_site == "lymph node" ~ "LN", 
+    biopsy_site == "skin" ~ "skin", 
+    is.na(biopsy_site) ~ NA_character_, 
+    TRUE ~ "other"
+  )) %>% 
+  select(grouped_biopsy_site, immune_hi.v.lo) %>% 
+  table()
+```
+
+```{r}
+tissue <- matrix(c(12, 6, 68, 36, 12, 9), nrow = 2,
+                 dimnames =
+                   list(c("immunehigh", "immunelow"),
+                        c("LN", "Skin", "Other")))
+
+print(tissue)
+fisher.test(tissue)
+```
+

@@ -1,0 +1,186 @@
+---
+title: "scRNA-seq Explore *** Assign cell types"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "single_cell", "helper_Seurat.R"))
+
+# document specific packages: 
+library(Seurat)
+
+file_cache_dir <- file.path(cache_dir, "sc-processing-raw-explore")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+obs_df <- read_csv(file.path(data_dir, "scRNAseq", "adata_pre_obs_2024-04-07.csv"))
+```
+
+# Cell types
+
+```{r}
+obs_df %>% 
+  plot_umap(color_str = "compartment") + 
+  scale_color_manual(values = palette_compartment)
+```
+
+## Adding general cell type
+
+```{r}
+so_imm <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+so_stromal <- readRDS(file.path(cache_dir, "sc-processing-sctransform-stromal", "so_stromal.rds"))
+```
+
+```{r}
+metadata_imm <- get_metadata_from_so(so_imm)
+metadata_stromal <- get_metadata_from_so(so_stromal)
+```
+
+```{r}
+cluster_imm <- metadata_imm %>% 
+  select(cell, general_cluster_immune)
+cluster_stromal <- metadata_stromal %>% 
+  select(cell, general_cluster_stromal)
+new_obs_df <- obs_df %>% 
+  left_join(cluster_imm, by = c("cell_label" = "cell")) %>% 
+  left_join(cluster_stromal, by = c("cell_label" = "cell")) %>% 
+  mutate(general_cell_type = case_when(
+    compartment == "Tumor" ~ "Tumor", 
+    compartment == "Stromal" ~ general_cluster_stromal, 
+    compartment == "Immune" ~ general_cluster_immune
+  )) %>% 
+  select(-cluster_stromal, -cluster_immune, -general_cluster_stromal, -general_cluster_immune)
+```
+
+```{r}
+new_obs_df %>% 
+  plot_umap(color_str = "general_cell_type", label = TRUE) 
+```
+
+```{r}
+new_obs_path <- file.path(data_dir, "scRNAseq", "adata_pre_obs.csv")
+if (!file.exists(new_obs_path)) write_csv(new_obs_df, new_obs_path)
+```
+
+## Adding specific cell types
+
+```{r}
+so_tnk <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune-tnk", "so_immune_tnk_integrated.rds"))
+so_m <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune-m", "so_immune_m_integrated.rds"))
+so_b <- readRDS(file.path(cache_dir, "sc-processing-sctransform-immune-b", "so_immune_b_integrated.rds"))
+```
+
+```{r}
+clusters_tnk_df <-
+  get_metadata_from_so(so_tnk, metadata = "general_clusters_T", reduction = NULL)
+clusters_m_df <-
+  get_metadata_from_so(so_m, metadata = "general_clusters_M", reduction = NULL)
+clusters_b_df <-
+  get_metadata_from_so(so_b, metadata = "general_clusters_B", reduction = NULL)
+metadata_to_add <-
+  get_metadata_from_so(
+    so_imm,
+    metadata = c("general_cluster_immune", "cluster_immune"),
+    reduction = NULL
+  ) %>%
+  left_join(clusters_tnk_df, by = "cell") %>%
+  left_join(clusters_m_df, by = "cell") %>%
+  left_join(clusters_b_df, by = "cell") %>%
+  mutate(
+    specific_cluster_immune = case_when(
+      general_cluster_immune == "Myeloid" & cluster_immune == "6: Neutrophils" ~ "Neutrophil", 
+      general_cluster_immune == "Myeloid" & cluster_immune == "8: Mast cell" ~ "Mast cell", 
+      general_cluster_immune == "Myeloid" &
+        general_clusters_M == "TAM" ~ "TAM",
+      general_cluster_immune == "Myeloid" &
+        general_clusters_M == "Monocyte" ~ "Monocyte",
+      general_cluster_immune == "Myeloid" ~ general_clusters_M,
+      general_cluster_immune == "T cell" &
+        general_clusters_T == "Proliferating" ~ "CD8+ T",
+      general_cluster_immune == "T cell" ~ general_clusters_T,
+      general_cluster_immune == "B cell" &
+        general_clusters_B == "Proliferating" ~ "B cells",
+      general_cluster_immune == "B cell" ~ general_clusters_B,
+      TRUE ~ general_cluster_immune
+    )
+  ) %>%
+  select(cell, specific_cluster_immune) %>%
+  column_to_rownames("cell")
+so_imm <- AddMetaData(so_imm, metadata = metadata_to_add)
+```
+
+```{r}
+get_metadata_from_so(so_imm) %>%
+  filter(specific_cluster_immune != "Stressed") %>%
+  filter(specific_cluster_immune != "Doublets") %>%
+  filter(specific_cluster_immune != "Contaminating") %>%
+  plot_umap(color_str = "specific_cluster_immune",
+            pixels = c(1024, 1024), 
+            pointsize = 2.1, 
+            label = T) + 
+  scale_color_manual(values = social_palette)
+```
+
+```{r}
+specific_cell_type_df <-
+  get_metadata_from_so(so_imm, metadata = "specific_cluster_immune", reduction = NULL)
+new_obs_df <- obs_df %>%
+  select(-specific_cluster_immune) %>% 
+  left_join(specific_cell_type_df, by = c("cell_label" = "cell"),
+            suffix = c("", ".new")) %>%
+  mutate(
+    specific_cell_type = case_when(
+      compartment == "Immune" ~ specific_cluster_immune,
+      TRUE ~ general_cell_type
+    )
+  ) %>% 
+  select(-str_subset(colnames(.), "\\.new"))
+```
+
+```{r}
+new_obs_df %>% 
+  filter(specific_cell_type != "Stressed") %>% 
+  filter(specific_cell_type != "Contaminating") %>% 
+  filter(specific_cell_type != "Doublets") %>% 
+  plot_umap(color_str = "specific_cell_type", label = TRUE) 
+```
+
+## Save it!
+
+```{r}
+today <- Sys.Date()
+new_obs_path <- file.path(data_dir, "scRNAseq", sprintf("adata_pre_obs_%s.csv", today))
+if (!file.exists(new_obs_path)) write_csv(new_obs_df, new_obs_path)
+```
+
+```{r}
+saveRDS(so_imm, file.path(cache_dir, "sc-processing-sctransform-immune", "so_immune.rds"))
+```
+
+# Clinical variables
+
+```{r}
+obs_df %>% plot_umap(color_str = "sample_ID", label = TRUE) 
+obs_df %>% 
+  mutate(`patient-clin` = factor(`patient-clin`)) %>% 
+  plot_umap(color_str = "patient-clin", label = TRUE) 
+```
+
+```{r}
+obs_df %>% plot_umap(color_str = "seq_batch", label = T)
+```
+
+```{r}
+obs_df %>% plot_umap(color_str = "treatment_group")
+obs_df %>% plot_umap(color_str = "sex") + scale_color_manual(values = set_names(palette_sex, c("F", "M")))
+obs_df %>% plot_umap(color_str = "subtype")
+obs_df %>% plot_umap(color_str = "tissue_type_short")
+```
+

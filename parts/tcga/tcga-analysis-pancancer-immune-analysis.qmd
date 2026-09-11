@@ -1,0 +1,169 @@
+---
+title: "TCGA pan cancer immune score"
+execute: 
+  freeze: auto
+  message: false
+  warning: false
+---
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+source(here("lib", "helper.R"))
+
+library(GSVA)
+
+file_cache_dir <- file.path(cache_dir, "tcga-analysis-pancancer-immune-score")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+
+tcga_data_dir <- file.path(data_dir, "TCGA_pan_can_atlas_2018")
+```
+
+```{r, message = FALSE}
+sample_df <- read_tsv(file.path(tcga_data_dir, "tcga_mega_clinical_sample.txt"))
+patient_df <- read_tsv(file.path(tcga_data_dir, "tcga_mega_clinical_patient.txt"))
+rna_list <- readRDS(file.path(tcga_data_dir, "tcga_mega_rna_list.rds"))
+
+signature_df <- read_excel(
+  file.path(data_dir, "signatures", "1-s2.0-S1535610821002221-mmc2.xlsx"), 
+  sheet = "Gene Description", 
+  skip = 1
+) 
+signature_list <- signature_df %>% 
+  named_group_split(`Gene signature`) %>% 
+  map(~.$Gene) 
+```
+
+```{r}
+names(rna_list)
+```
+
+```{r}
+run_signature_scoring <- function(tpm_df) {
+  
+  tpm_matrix <- tpm_df %>%
+    pivot_longer(cols = 3:ncol(.),
+                 names_to = "sample_RNA",
+                 values_to = "value") %>%
+    group_by(sample_RNA, Hugo_Symbol) %>%
+    summarise(value = sum(value)) %>%
+    pivot_wider(id_cols = Hugo_Symbol, names_from = sample_RNA) %>%
+    drop_na(Hugo_Symbol) %>%
+    column_to_rownames("Hugo_Symbol") %>%
+    as.matrix() 
+  
+  if (sum(is.na(tpm_matrix)) > 0) {
+    warning("found NAs, to zeroes")
+    tpm_matrix[is.na(tpm_matrix)] <- 0
+  }
+    
+  bagaev_ssgsea_df <- gsva(
+      tpm_matrix,
+      gset.idx.list = signature_list,
+      method = "ssgsea",
+      kcdf = "Gaussian",
+      min.sz = 3
+    ) %>% as_tibble(rownames = "gs_name")
+  
+  return(bagaev_ssgsea_df)
+}
+```
+
+```{r, message = FALSE, warning = FALSE}
+ssgsea_df_list <- run_or_readRDS(
+  file.path(file_cache_dir, "bagaev_ssgsea_list.rds"), 
+  function() {map(rna_list, run_signature_scoring)}
+)
+```
+
+```{r}
+ssgsea_tidy_list <- ssgsea_df_list %>% 
+  map(~pivot_longer(..1, cols = 2:ncol(..1), names_to = "sample_RNA", values_to = "score"))
+ssgsea_tidy <- ssgsea_tidy_list %>% 
+  list_rbind(names_to = "type") %>% 
+  drop_na(score) %>% 
+  dplyr::rename(NAME = gs_name) %>%
+  group_by(NAME) %>%
+  mutate(zscore = as.vector(scale(score))) %>%
+  ungroup() 
+
+h_mtx <- ssgsea_tidy %>% 
+  pivot_wider(id_cols = NAME, 
+              names_from = sample_RNA, 
+              values_from = zscore) %>% 
+  column_to_rownames("NAME") %>% 
+  as.matrix()
+```
+
+```{r, eval = FALSE}
+Heatmap(h_mtx, show_column_names = FALSE)
+```
+
+```{r}
+immune_signatures <- read_tsv(file.path(results_dir, "immune_signatures.tsv"))$signatures
+```
+
+
+```{r}
+immune_zscore_df <- ssgsea_tidy %>% 
+  filter(NAME %in% immune_signatures) %>% 
+  group_by(type, sample_RNA) %>% 
+  summarise(immune_zscore = mean(zscore)) 
+```
+
+```{r}
+# samples actually used in analysis
+immune_hi.v.lo_df <- readRDS(file.path(results_dir,"immune_hi.v.lo.rds"))
+```
+
+
+```{r}
+cohort_df <- immune_hi.v.lo_df %>% 
+  select(sample_RNA, immune_zscore) %>% 
+  mutate(type = "melanoma_cohort")
+immune_zscore_df %>% 
+  bind_rows(cohort_df) %>% 
+  group_by(type) %>% 
+  mutate(mean = mean(immune_zscore)) %>% 
+  arrange(mean) %>% 
+  ggplot() + 
+  aes(fct_reorder(type, immune_zscore), immune_zscore) + 
+  geom_boxplot() + 
+  coord_flip()
+```
+
+```{r, fig.asp = 1, fig.width = 5}
+cohort_split_df <- immune_hi.v.lo_df %>% 
+  select(sample_RNA, immune_zscore, immune_hi.v.lo) %>% 
+  mutate(type = paste0("melanoma_cohort_", immune_hi.v.lo, "_only"))
+immune_zscore_df %>% 
+  mutate(type = str_remove(type, "_tcga_pan_can_atlas_2018")) %>% 
+  bind_rows(cohort_df) %>% 
+  bind_rows(cohort_split_df) %>% 
+  group_by(type) %>% 
+  mutate(mean = mean(immune_zscore)) %>% 
+  arrange(mean) %>% 
+  mutate(category = case_when(
+    type == "melanoma_cohort" ~ "black", 
+    type == "skcm" ~ "black", 
+    type == "melanoma_cohort_immune high_only" ~ "red", 
+    type == "melanoma_cohort_immune low_only" ~ "blue", 
+    TRUE ~ "grey30"
+  )) %>% 
+  ggplot() + 
+  aes(fct_reorder(type, immune_zscore), immune_zscore) + 
+  geom_boxplot(aes(color = category), show.legend = F) + 
+  coord_flip() + 
+  scale_color_manual(values = c("black", "blue", "grey50", "red")) + 
+  theme(axis.line.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        panel.grid.major.y = element_line(color = "grey90"), 
+        panel.grid.major.x = element_line(color = "grey90")) + 
+  labs(x = "")
+```
+
+
+
+
+

@@ -1,0 +1,265 @@
+---
+title: "Transcriptomic Immune Signatures"
+execute: 
+  message: false
+  warning: false
+  freeze: auto
+---
+
+# Purpose
+
+The purpose of this part is to look at other signatures which have been used to proxy immune infiltrate 
+
+# Other sources
+
+* Ayers IFNg signature 
+* Ayers expanded IFNg signature
+* Hallmark interferon gamma signature
+* TLS marker genes as given in Cabrita et al. 
+* Cabrita TLS signature
+* CIBERSORTx absolute immune score (LM22)
+* CIBERSORTx immune proportion (Tirosh signature)
+
+# Set up
+
+```{r}
+library(here)
+source(here("lib", "setup.R"))
+source(here("lib", "aesthetics.R"))
+
+library(GSVA)
+
+file_cache_dir <- file.path(cache_dir, "bulk-analysis-other-immune-signatures")
+if (!dir.exists(file_cache_dir)) dir.create(file_cache_dir)
+```
+
+```{r}
+list.files(results_dir) %>% str_subset("ssgsea")
+```
+
+```{r}
+immune_hi.v.lo_df <- readRDS(file.path(results_dir, "immune_hi.v.lo.rds"))
+bulk_clin_metadata <- read_tsv(file.path(data_dir, "bulk", "bulk-clin-metadata.tsv")) %>% 
+  drop_na(sample_RNA) %>% 
+  filter(is.na(excluded_clin) & is.na(excluded_rna)) %>% 
+  select(-immune_hi.v.lo, -immune_zscore, -immune_hi.v.lo_zscore) %>% 
+  left_join(immune_hi.v.lo_df, by = "sample_RNA")
+
+tpm_df <- readRDS(file.path(results_dir, "tpm_df_combatseq.rds")) %>% 
+  filter(sample_RNA %in% bulk_clin_metadata$sample_RNA)
+tpm_tidy <- tpm_df %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "gene")
+tpm_matrix <- tpm_df %>% 
+  column_to_rownames("sample_RNA") %>% 
+  as.matrix() %>% 
+  t()
+```
+
+# Generate signatures
+
+## CIBERSORTx
+
+Prepare mixture file for CIBERSORTx
+
+```{r}
+tpm_cibersort_mixture <- tpm_tidy %>% 
+  pivot_wider(id_cols = gene, 
+              names_from = sample_RNA, 
+              values_from = value) %>% 
+  dplyr::rename(Gene = gene)
+write_tsv(tpm_cibersort_mixture, file.path(file_cache_dir, "tpm_cibersort_mixture.txt"))
+```
+
+```{r}
+cibersort_dir <- file.path(data_dir, "cibersortx")
+cibersort_lm22 <- read_tsv(file.path(cibersort_dir, "CIBERSORTx_Job1_Results.txt"))
+cibersort_tirosh <- read_tsv(file.path(cibersort_dir, "CIBERSORTx_Job3_Results.txt"))
+```
+
+```{r}
+cibersort_lm22_df <- cibersort_lm22 %>% 
+  select(Mixture,`T cells CD8`, `Absolute score (sig.score)`) %>% 
+  rename(sample_RNA = Mixture, 
+         CIBERSORT_LM22_CD8_T_proportion = `T cells CD8`, 
+         CIBERSORT_LM22_Absolute = `Absolute score (sig.score)`) %>% 
+  mutate(CIBERSORT_LM22_CD8_T_proportion_zscore = as.vector(scale(CIBERSORT_LM22_CD8_T_proportion)),
+         CIBERSORT_LM22_Absolute_zscore = as.vector(scale(CIBERSORT_LM22_Absolute)))
+
+cibersort_tirosh_df <- cibersort_tirosh %>% 
+  mutate(CIBERSORT_tirosh_immune_proportion = `T cells CD8` + `NK cells` + `Macrophages` + `T cells CD4` + `B cells`) %>% 
+  select(Mixture,`T cells CD8`, CIBERSORT_tirosh_immune_proportion) %>% 
+  rename(sample_RNA = Mixture, 
+         CIBERSORT_tirosh_CD8_T_proportion = `T cells CD8`) %>% 
+  mutate(CIBERSORT_tirosh_CD8_T_proportion_zscore = as.vector(scale(CIBERSORT_tirosh_CD8_T_proportion)),
+         CIBERSORT_tirosh_immune_proportion_zscore = as.vector(scale(CIBERSORT_tirosh_immune_proportion)))
+
+cibersort_df <- cibersort_lm22_df %>% 
+  left_join(cibersort_tirosh_df, by = "sample_RNA")
+```
+
+
+## Cabrita signature
+
+```{r}
+cabrita_sig <- list(
+  cabrita_TLS = c("CD79B", "CD1D", "CCR6", "LAT", "SKAP1", "CETP", "EIF1AY", "RBP5", "PTGDS"), 
+  TLS_marker_genes = c("CCL19", "CCL21", "CXCL13", "CCR7", "SELL", "LAMP3", "CXCR4", "CD86", "BCL6")
+)
+```
+
+Run ssgsea
+
+```{r}
+cabrita_ssgsea_df <- gsva(
+  tpm_matrix,
+  gset.idx.list = cabrita_sig,
+  method = "ssgsea",
+  kcdf = "Gaussian",
+  min.sz = 3
+) %>%
+  as_tibble(rownames = "gs_name") %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample_RNA", 
+               values_to = "score") %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  pivot_wider(id_cols = sample_RNA, 
+              names_from = gs_name,  
+              values_from = c(score, zscore))
+```
+
+## Ayer signature
+
+```{r}
+ayers_sig <- list(
+  ayers_ifng = c("IDO1", "CXCL10", "CXCL9", "HLA-DRA", "STAT1", "IFNG"), 
+  ayers_ifng_expanded = c("IDO1", "CXCL10", "CXCL9", "HLA-DRA", "STAT1", "IFNG", 
+                         "CD3D", "CIITA", "CD3E", "CCL5", "GZMK", "CD2", 
+                         "CXCL13", "IL2RG", "NKG7", "HLA-E", "CXCR6", 
+                         "LAG3", "TAGAP", "GZMB")
+)
+```
+
+Run ssgsea
+
+```{r}
+ayers_ssgsea_df <- gsva(
+  tpm_matrix,
+  gset.idx.list = ayers_sig,
+  method = "ssgsea",
+  kcdf = "Gaussian",
+  min.sz = 3
+) %>%
+  as_tibble(rownames = "gs_name") %>% 
+  pivot_longer(cols = 2:ncol(.), 
+               names_to = "sample_RNA", 
+               values_to = "score") %>% 
+  mutate(zscore = as.vector(scale(score))) %>% 
+  pivot_wider(id_cols = sample_RNA, 
+              names_from = gs_name,  
+              values_from = c(score, zscore))
+```
+
+
+# Read in already generated signatures
+
+## Hallmark Ifng
+
+```{r}
+ifng_df <- readRDS(file.path(results_dir, "ssgsea_tidy.rds")) %>% 
+  filter(NAME == "HALLMARK_INTERFERON_GAMMA_RESPONSE") %>% 
+  select(-NAME) %>% 
+  dplyr::rename(HALLMARK_INTERFERON_GAMMA_RESPONSE_score = score, 
+                HALLMARK_INTERFERON_GAMMA_RESPONSE_zscore = zscore)
+```
+
+# Merge 
+
+```{r}
+immune_sig_df <- bulk_clin_metadata %>% 
+  select(sample_RNA, immune_zscore, immune_hi.v.lo) %>% 
+  dplyr::rename(immune_score = immune_zscore) %>% 
+  left_join(cibersort_df, by = "sample_RNA") %>% 
+  left_join(ifng_df, by = "sample_RNA") %>% 
+  left_join(cabrita_ssgsea_df, by = "sample_RNA") %>% 
+  left_join(ayers_ssgsea_df, by = "sample_RNA") 
+write_tsv(immune_sig_df, file.path(results_dir, "external_immune_signatures.txt"))
+```
+
+# Analysis
+
+```{r}
+immune_sig_df %>% 
+  pivot_longer(cols = str_subset(colnames(.), "zscore")) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c("immune low", "immune high"))) %>% 
+  mutate(name = str_wrap(str_replace_all(name, "_", " "), width = 10)) %>% 
+  ggplot() + 
+  aes(immune_hi.v.lo, value) + 
+  geom_boxplot(outlier.size = 0, outlier.stroke = 0) + 
+  geom_jitter(aes(color = immune_hi.v.lo), 
+              width = 0.2, size = 0.5) + 
+  facet_grid(~name) + 
+  scale_color_manual(values = palette_immune_state) + 
+  rotate_x_text() + 
+  remove_x_spine() + 
+  theme(legend.position = "none")
+```
+
+
+```{r, fig.asp = 1}
+cor_mtx <- immune_sig_df %>% 
+  select(-str_subset(colnames(.), "zscore"), -immune_hi.v.lo) %>% 
+  column_to_rownames("sample_RNA") %>% 
+  cor(method = "spearman") 
+ht <- Heatmap(
+  cor_mtx,
+  name = "spearman cor",
+  col = colorRamp2(breaks = c(-1, 0, 1),
+                   color = palette_cor),
+  height = unit(80, "mm"),
+  width = unit(80, "mm"), 
+  column_dend_reorder = TRUE, 
+  row_dend_reorder = TRUE, 
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    grid.text(sprintf("%.2f", cor_mtx[i, j]), x, y, gp = gpar(fontsize = 8))
+  }
+)
+draw(ht, heatmap_legend_side = "right")
+```
+
+```{r, fig.asp = 1, fig.width = 10}
+immune_sig_df %>% 
+  pivot_longer(cols = str_subset(colnames(.), "zscore")) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c("immune low", "immune high"))) %>% 
+  mutate(name = str_wrap(str_replace_all(name, "_", " "), width = 15)) %>% 
+  ggplot() + 
+  aes(immune_score, value) + 
+  geom_point() + 
+  facet_wrap(~name) + 
+  theme(aspect.ratio = 1) + 
+  stat_cor(method = "spearman") 
+```
+
+```{r, fig.asp = 1, fig.width = 10}
+immune_sig_df %>% 
+  pivot_longer(cols = str_subset(colnames(.), "zscore")) %>% 
+  mutate(immune_hi.v.lo = factor(immune_hi.v.lo, levels = c("immune low", "immune high"))) %>% 
+  mutate(name = str_wrap(str_replace_all(name, "_", " "), width = 15)) %>% 
+  ggplot() + 
+  aes(immune_score, value) + 
+  geom_point(aes(color = immune_hi.v.lo)) + 
+  facet_wrap(~name) + 
+  theme(aspect.ratio = 1) + 
+  stat_cor(method = "spearman") + 
+  scale_color_manual(values = palette_immune_state)
+```
+
+
+
+
+
+
+
+
+
+
